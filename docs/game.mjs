@@ -5,6 +5,7 @@ import { createRenderer, loadArt } from './render.mjs';
 import { drawPixelText } from './pixel-text.mjs';
 import { createMatchMenu } from './menu.mjs';
 import { createGameAudio } from './audio.mjs';
+import { contextAction, createGamepad, joystickJumpDirection } from './gamepad.mjs';
 import { GRAPPLES, ROSTER, SIGNATURES } from './roster.mjs';
 
 const get = (id) => document.getElementById(id);
@@ -22,12 +23,16 @@ const timerFace = get('timer-face');
 const signatureName = get('signature-name');
 const grappleName = get('grapple-name');
 const signatureCooldown = get('signature-cooldown');
+const gamepadSignature = get('gamepad-signature');
+const gamepadCooldown = get('gamepad-cooldown');
 const overlay = get('overlay');
 const overlayHeading = get('overlay-heading');
 const overlayText = get('overlay-text');
 const overlayActions = get('overlay-actions');
 const overlayPrimary = get('overlay-primary');
 const overlayMenu = get('overlay-menu');
+const gamepadRoot = get('gamepad');
+const gamepadGuide = get('gamepad-guide');
 const call = get('match-call');
 const pinHint = get('pin-hint');
 const pinPressure = get('pin-pressure');
@@ -45,11 +50,11 @@ const actions = {
   KeyJ: 'strike', KeyK: 'throw', KeyI: 'jump', KeyE: 'interact', KeyL: 'ropeBreak',
   KeyT: 'taunt', Space: 'pin'
 };
-const interactionHints = {
-  climb: 'E — Climb the turnbuckle',
-  descend: 'I — Dive · E — Climb down',
-  exit: 'E — Leave the ring',
-  enter: 'E — Enter the ring'
+const directionKeys = { left: 'ArrowLeft', right: 'ArrowRight', back: 'ArrowUp', front: 'ArrowDown' };
+const interactionNames = { climb: 'Climb the turnbuckle', exit: 'Leave the ring', enter: 'Enter the ring' };
+const controlLabels = {
+  keyboard: { strike: 'J', throw: 'K', jump: 'I', interact: 'E', ropeBreak: 'L', pin: 'Space' },
+  gamepad: { strike: 'A', throw: 'B', jump: 'X', interact: 'B + X', ropeBreak: 'B + Y', pin: 'Y' }
 };
 const resultText = {
   pin: 'Three-count pinfall.',
@@ -59,6 +64,8 @@ const resultText = {
 };
 const held = new Set();
 const buffered = new Map();
+const gamepadBuffer = new Map();
+const gamepadLayout = window.matchMedia('(max-width: 760px), (any-pointer: coarse)');
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const audio = createGameAudio();
 let selection;
@@ -72,9 +79,96 @@ let lastTime = null;
 let accumulated = 0;
 let resultDisplayTime = 0;
 let paintedClock;
+let controlScheme = gamepadLayout.matches ? 'gamepad' : 'keyboard';
+let gamepadGuard = false;
+let overlayChoice;
+
+const gamepad = createGamepad(gamepadRoot, {
+  onUse() { controlScheme = 'gamepad'; },
+  onButton: handleGamepadButton,
+  onDirection: handleGamepadDirection,
+  onPress: pressGamepadAction,
+  onRelease(action) {
+    if (action === 'context' || action === 'guard') gamepadGuard = false;
+  }
+});
+
+function bufferAction(buffer, action) {
+  buffer.set(action, (buffer.get(action) || 0) + 1);
+}
+
+function pressGamepadAction(action) {
+  if (mode !== 'fight' || match.end) return;
+  if (action === 'pause') {
+    pauseFight();
+    return;
+  }
+  const contextual = action === 'context';
+  if (contextual) action = contextAction(match, canPin(match, 0));
+  if (action === 'guard') {
+    gamepadGuard = true;
+    bufferAction(gamepadBuffer, 'block');
+    if (!contextual) bufferAction(gamepadBuffer, 'ropeBreak');
+  } else {
+    bufferAction(gamepadBuffer, action);
+  }
+}
+
+function updateGamepad(screen) {
+  gamepadGuide.hidden = mode !== 'fight';
+  switch (mode) {
+    case 'fight':
+      gamepad.setScreen({ fight: true, labels: { A: 'Strike', B: 'Grapple', X: 'Jump', Y: 'Block' } });
+      break;
+    case 'menu':
+      gamepad.setScreen(screen === 'versus'
+        ? { labels: { B: 'Back' } }
+        : { move: true, labels: { A: 'Select', B: screen === 'home' ? '' : 'Back' } });
+      break;
+    case 'paused':
+      gamepad.setScreen({ move: true, labels: { A: 'Select', B: 'Resume' } });
+      break;
+    case 'result':
+      gamepad.setScreen({ move: true, labels: { A: 'Select', B: 'Menu' } });
+      break;
+    case 'error':
+      gamepad.setScreen({ labels: { A: 'Retry' } });
+      break;
+    default:
+      gamepad.setScreen();
+  }
+}
+
+function handleGamepadButton(button) {
+  if (mode === 'menu') {
+    if (button === 'A') menu.confirm();
+    else if (button === 'B') menu.back();
+  } else if (button === 'A' && (mode === 'paused' || mode === 'result' || mode === 'error')) {
+    overlayChoice.click();
+  } else if (button === 'B') {
+    if (mode === 'paused') resumeFight();
+    else if (mode === 'result') showMenu();
+  }
+}
+
+function handleGamepadDirection(direction) {
+  if (mode === 'menu') menu.move(directionKeys[direction]);
+  else if (mode === 'paused' || mode === 'result') {
+    const button = direction === 'left' || direction === 'back' ? overlayPrimary : overlayMenu;
+    setOverlayChoice(button);
+    button.focus({ preventScroll: true });
+  }
+}
 
 function describe(text) {
   if (announcement.textContent !== text) announcement.textContent = text;
+}
+
+function setOverlayChoice(button) {
+  if (overlayChoice === button) return;
+  overlayChoice?.removeAttribute('data-current');
+  overlayChoice = button;
+  button.setAttribute('data-current', '');
 }
 
 function showOverlay(heading, body = '', primary = '', menu = true) {
@@ -85,9 +179,11 @@ function showOverlay(heading, body = '', primary = '', menu = true) {
   overlayActions.hidden = !primary;
   overlayMenu.hidden = !menu;
   overlay.hidden = false;
+  setOverlayChoice(overlayPrimary);
 }
 
 function setMode(next) {
+  clearGamepadInput();
   mode = next;
   const onRing = mode === 'fight' || mode === 'paused' || mode === 'result';
   audio.setTrack(mode === 'fight' || mode === 'menu' ? 'crowd' : null);
@@ -97,6 +193,8 @@ function setMode(next) {
   stageFooter.hidden = !onRing;
   menuRoot.hidden = mode !== 'menu';
   pause.hidden = mode !== 'fight';
+  canvas.setAttribute('aria-describedby', gamepadLayout.matches ? 'gamepad-guide' : 'controls-keys');
+  if (mode !== 'menu') updateGamepad();
 }
 
 function updateScore() {
@@ -114,7 +212,10 @@ function updateScore() {
   }
   const secondsToReady = Math.ceil(Math.max(0, match.fighters[0].signatureCooldown - 1e-8));
   const cooldownText = secondsToReady > 0 ? `${secondsToReady}s` : '';
-  if (signatureCooldown.textContent !== cooldownText) signatureCooldown.textContent = cooldownText;
+  if (signatureCooldown.textContent !== cooldownText) {
+    signatureCooldown.textContent = cooldownText;
+    gamepadCooldown.textContent = cooldownText;
+  }
 
   match.fighters.forEach((fighter, index) => {
     const meter = health[index];
@@ -127,6 +228,7 @@ function updateScore() {
 
 function updateCall() {
   const { pin, hold, outside } = match;
+  const keys = controlLabels[controlScheme];
   call.hidden = mode !== 'fight' || outside.elapsed === 0;
   pinPressure.hidden = mode !== 'fight' || !pin || Boolean(match.end);
   if (!pinPressure.hidden) {
@@ -140,24 +242,36 @@ function updateCall() {
   let hint = '';
   if (mode === 'fight' && !match.end) {
     const player = match.fighters[0];
+    const pinAvailable = canPin(match, 0);
+    const context = contextAction(match, pinAvailable);
+    if (gamepadLayout.matches) {
+      const escaping = pin?.attacker === 1 || hold?.index === 1;
+      gamepad.setLabel('Y', context === 'guard' ? 'Block' : escaping ? 'Escape' : 'Pin');
+      gamepad.setLabel('B', hold?.index === 0 && hold.phase === 'clinch' ? 'Throw' : 'Grapple');
+    }
+    const interaction = availableInteraction(player)?.name;
     if (pin) {
-      hint = pin.attacker === 0 ? 'Tap Space to keep the pin' : 'Tap Space to kick out';
-      if (pin.attacker === 1 && canReachRopes(player)) hint += ' · L — Grab the rope';
+      hint = pin.attacker === 0 ? `Tap ${keys.pin} to keep the pin` : `Tap ${keys.pin} to kick out`;
+      if (pin.attacker === 1 && canReachRopes(player)) hint += ` · ${keys.ropeBreak} — Grab the rope`;
     } else if (hold) {
       if (hold.phase === 'clinch') {
-        if (hold.index === 1) hint = `Space — Escape ${hold.escape}/${hold.needed}`;
-        else if (!hold.contact.signature && !hold.queued) hint = 'K — Throw';
+        if (hold.index === 1) hint = `${keys.pin} — Escape ${hold.escape}/${hold.needed}`;
+        else if (!hold.contact.signature && !hold.queued) hint = `${keys.throw} — Throw`;
       }
-    } else if (canPin(match, 0)) {
-      hint = 'Press Space to pin';
+    } else if (pinAvailable) {
+      hint = `Press ${keys.pin} to pin`;
     } else if (match.fighters[1].attack?.name === 'shove' && player.pose === 'perch') {
-      hint = 'Shove incoming · I — Dive';
+      hint = `Shove incoming · ${keys.jump} — Dive`;
     } else if (player.motion?.kind === 'jump' && !player.motion.strike) {
-      hint = 'J — Air strike';
-    } else if (!pin) {
-      hint = interactionHints[availableInteraction(player)?.name] || '';
-      if (!hint && player.rush && !player.rush.queued) hint = 'J — Running strike';
-      if (!hint && player.combo) hint = player.combo.hits === 2 ? 'K — Finish combo' : 'J or K — Continue combo';
+      hint = `${keys.strike} — Air strike`;
+    } else if (interaction === 'descend') {
+      hint = `${keys.jump} — Dive · ${keys.interact} — Climb down`;
+    } else if (interaction) {
+      hint = `${keys.interact} — ${interactionNames[interaction]}`;
+    } else if (player.rush && !player.rush.queued) {
+      hint = `${keys.strike} — Running strike`;
+    } else if (player.combo) {
+      hint = player.combo.hits === 2 ? `${keys.throw} — Finish combo` : `${keys.strike} or ${keys.throw} — Continue combo`;
     }
   }
   if (pinHint.textContent !== hint) pinHint.textContent = hint;
@@ -179,34 +293,55 @@ function render() {
   updateCall();
 }
 
-function clearInput() {
+function clearKeyboardInput() {
   held.clear();
   buffered.clear();
 }
 
+function clearGamepadInput() {
+  gamepad.reset();
+  gamepadBuffer.clear();
+  gamepadGuard = false;
+}
+
 function stopClock() {
   cancelAnimationFrame(frameId);
-  clearInput();
+  clearKeyboardInput();
   lastTime = null;
   accumulated = 0;
 }
 
 function input() {
-  const directions = new Set([...held].map((key) => movement[key]));
+  const directions = new Set();
+  for (const key of held) {
+    if (movement[key]) directions.add(movement[key]);
+  }
+  const count = (action) => (buffered.get(action) || 0) + (gamepadBuffer.get(action) || 0);
+  const jump = Boolean(count('jump'));
+  let direction = gamepad.movement;
+  if (directions.size) {
+    direction = {
+      x: Number(directions.has('right')) - Number(directions.has('left')),
+      z: Number(directions.has('front')) - Number(directions.has('back'))
+    };
+  } else if (jump) {
+    direction = joystickJumpDirection(direction);
+  }
   const command = {
-    x: Number(directions.has('right')) - Number(directions.has('left')),
-    z: Number(directions.has('front')) - Number(directions.has('back')),
-    block: held.has('KeyL'),
-    ropeBreak: buffered.has('ropeBreak'),
-    strike: buffered.has('strike'),
-    signature: buffered.has('signature'),
-    throw: buffered.get('throw') || 0,
-    jump: buffered.has('jump'),
-    interact: buffered.has('interact'),
-    taunt: buffered.has('taunt'),
-    pin: buffered.get('pin') || 0
+    x: direction.x,
+    z: direction.z,
+    block: held.has('KeyL') || (!match.pin && (gamepadGuard || gamepadBuffer.has('block'))),
+    ropeBreak: Boolean(count('ropeBreak')),
+    strike: Boolean(count('strike')),
+    signature: Boolean(count('signature')),
+    throw: count('throw'),
+    jump,
+    interact: Boolean(count('interact')),
+    taunt: Boolean(count('taunt')),
+    pin: count('pin')
   };
   buffered.clear();
+  gamepadBuffer.clear();
   return command;
 }
 
@@ -226,14 +361,18 @@ function tick(now) {
     const previousCount = match.outside.count;
     const previousPoses = match.fighters.map((fighter) => fighter.pose);
     stepMatch(match, input());
-    if (match.end) audio.setTrack(null);
+    if (match.end) {
+      clearGamepadInput();
+      audio.setTrack(null);
+    }
+    const keys = controlLabels[controlScheme];
     if (match.pin !== previousPin) {
       if (!match.pin) describe(match.pinBreak === 'rope' ? 'Rope break. The referee stopped the pin.' : 'The pin was broken.');
-      else if (match.pin.attacker === 0) describe('Pin. Tap Space to keep the pin.');
+      else if (match.pin.attacker === 0) describe(`Pin. Tap ${keys.pin} to keep the pin.`);
       else {
         const player = match.fighters[0];
-        const rope = canReachRopes(player) ? ' Press L to grab the rope.' : '';
-        describe(`Your opponent is pinning you. Tap Space to kick out.${rope}`);
+        const rope = canReachRopes(player) ? ` Press ${keys.ropeBreak} to grab the rope.` : '';
+        describe(`Your opponent is pinning you. Tap ${keys.pin} to kick out.${rope}`);
       }
     } else if (match.pin && match.pin.count > previousPinCount) {
       describe(`Pin count ${match.pin.count}.`);
@@ -246,8 +385,8 @@ function tick(now) {
     } else if (match.outside.count > previousCount) {
       describe(`Countout ${match.outside.count}.`);
     } else if (match.hold !== previousHold && match.hold) {
-      if (match.hold.index === 1) describe(`Grapple. Tap Space ${match.hold.needed} times to escape.`);
-      else describe(match.hold.contact.signature ? 'Signature grapple.' : 'Grapple. Press K to throw.');
+      if (match.hold.index === 1) describe(`Grapple. Tap ${keys.pin} ${match.hold.needed} times to escape.`);
+      else describe(match.hold.contact.signature ? 'Signature grapple.' : `Grapple. Press ${keys.throw} to throw.`);
     } else if (match.hold?.phase === 'throw' && previousHoldPhase === 'clinch') {
       describe('Throw.');
     } else if (previousHoldPhase === 'clinch' && !match.hold) {
@@ -324,6 +463,7 @@ function showMenu() {
   grappleName.textContent = 'Throw';
   signatureName.textContent = 'Signature move';
   signatureCooldown.textContent = '';
+  gamepadCooldown.textContent = '';
   describe('');
   menu.openHome();
 }
@@ -332,6 +472,7 @@ function setMatchPresentation() {
   const { player, opponent, arena } = selection;
   const view = art.arenas[arena];
   signatureName.textContent = SIGNATURES[player].label;
+  gamepadSignature.textContent = SIGNATURES[player].label;
   grappleName.textContent = GRAPPLES[player].label;
   get('venue-name').textContent = view.name;
   stage.style.setProperty('--arena-ratio', view.size.join(' / '));
@@ -350,6 +491,8 @@ async function boot() {
     art = await loadArt();
     draw = createRenderer(canvas, art);
     menu = createMatchMenu(menuRoot, art.arenas, startFight, reducedMotion, (screen, versusOffset) => {
+      clearGamepadInput();
+      updateGamepad(screen);
       if (screen === 'versus') audio.setTrack('versus', versusOffset);
       else audio.setTrack('crowd');
     });
@@ -375,6 +518,9 @@ soundToggle.addEventListener('click', () => {
 });
 
 pause.addEventListener('click', pauseFight);
+overlayActions.addEventListener('focusin', (event) => {
+  if (event.target === overlayPrimary || event.target === overlayMenu) setOverlayChoice(event.target);
+});
 overlayMenu.addEventListener('click', showMenu);
 overlayPrimary.addEventListener('click', () => {
   if (mode === 'paused') resumeFight();
@@ -384,6 +530,9 @@ overlayPrimary.addEventListener('click', () => {
 
 window.addEventListener('click', (event) => {
   if (event.isTrusted && !soundToggle.contains(event.target)) audio.activate();
+}, { capture: true });
+gamepadRoot.addEventListener('pointerup', (event) => {
+  if (event.isTrusted) audio.activate();
 }, { capture: true });
 
 window.addEventListener('keydown', (event) => {
@@ -422,18 +571,29 @@ window.addEventListener('keydown', (event) => {
       event.metaKey || event.altKey || (!movement[code] && !actions[code])) return;
   event.preventDefault();
   if (event.repeat || held.has(code)) return;
+  controlScheme = 'keyboard';
   held.add(code);
   const action = code === 'KeyJ' && event.shiftKey ? 'signature' : actions[code];
-  if (action) buffered.set(action, (buffered.get(action) || 0) + 1);
+  if (action) bufferAction(buffered, action);
 });
 
 window.addEventListener('keyup', (event) => held.delete(event.code));
-window.addEventListener('blur', pauseFight);
-canvas.addEventListener('blur', clearInput);
+window.addEventListener('blur', () => {
+  clearGamepadInput();
+  pauseFight();
+});
+window.addEventListener('resize', clearGamepadInput);
+gamepadLayout.addEventListener('change', () => {
+  controlScheme = gamepadLayout.matches ? 'gamepad' : 'keyboard';
+  clearGamepadInput();
+  canvas.setAttribute('aria-describedby', gamepadLayout.matches ? 'gamepad-guide' : 'controls-keys');
+});
+canvas.addEventListener('blur', clearKeyboardInput);
 canvas.addEventListener('click', () => {
   if (mode === 'fight') focusRing();
 });
 document.addEventListener('visibilitychange', () => {
+  if (document.hidden) clearGamepadInput();
   if (mode === 'menu') menu.updatePresentation();
   else if (document.hidden) pauseFight();
   audio.visibilityChanged();

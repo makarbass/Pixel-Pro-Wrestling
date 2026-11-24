@@ -118,6 +118,17 @@ export function createMatchMenu(root, arenas, onStart, reducedMotion, onScreenCh
     if (highlighted) highlighted.setAttribute('data-current', '');
   }
 
+  function focusChoice(button, scrollPage = false) {
+    if (!button) return;
+    const scrollMenu = root.scrollHeight > root.clientHeight;
+    button.focus({ preventScroll: scrollMenu || !scrollPage });
+    if (!scrollMenu) return;
+    const bounds = root.getBoundingClientRect();
+    const choice = button.getBoundingClientRect();
+    if (choice.top < bounds.top) root.scrollTop += choice.top - bounds.top - 4;
+    else if (choice.bottom > bounds.bottom) root.scrollTop += choice.bottom - bounds.bottom + 4;
+  }
+
   function versusTime(now = window.performance.now()) {
     return elapsed + (visibleSince === null ? 0 : Math.max(0, now - visibleSince));
   }
@@ -151,7 +162,8 @@ export function createMatchMenu(root, arenas, onStart, reducedMotion, onScreenCh
     section.hidden = false;
     const target = section.querySelector(focusSelector);
     highlight(target?.matches(MENU_CHOICE) ? target : null);
-    target?.focus({ preventScroll: true });
+    root.scrollTop = 0;
+    focusChoice(target);
     updatePresentation();
     onScreenChange(screen, () => versusTime() / 1000);
   }
@@ -324,27 +336,28 @@ export function createMatchMenu(root, arenas, onStart, reducedMotion, onScreenCh
       return;
     }
 
-    if (entry.dataset.action === 'back' && key === 'ArrowDown' && highlighted) {
-      event.preventDefault();
-      highlighted.focus();
-      return;
-    }
+    if (moveChoice(entry, key, true)) event.preventDefault();
+  }
 
+  function moveChoice(entry, key, keyboard = false) {
+    if (keyboard && entry.dataset.action === 'back' && key === 'ArrowDown' && highlighted) {
+      focusChoice(highlighted, true);
+      return true;
+    }
     const direction = arrowDirections[key];
-    if (!direction || !entry.matches(MENU_CHOICE)) return;
+    if (!direction || !entry.matches(MENU_CHOICE)) return false;
     const grid = entry.parentElement;
     const columns = Number(grid.dataset.menuColumns);
     const [dx, dy] = direction;
-    if (dx && columns === 1) return;
-    event.preventDefault();
+    if (dx && columns === 1) return false;
 
     const buttons = Array.from(grid.children);
     const from = buttons.indexOf(entry);
-    if (key === 'ArrowUp' && from < columns) {
-      const backButton = screen.querySelector('[data-action="back"]');
+    if (keyboard && key === 'ArrowUp' && from < columns) {
+      const backButton = screens[current].querySelector('[data-action="back"]');
       if (backButton) {
-        backButton.focus();
-        return;
+        focusChoice(backButton, true);
+        return true;
       }
     }
 
@@ -352,11 +365,16 @@ export function createMatchMenu(root, arenas, onStart, reducedMotion, onScreenCh
     for (let next = from + step; next >= 0 && next < buttons.length; next += step) {
       if (dx && Math.floor(next / columns) !== Math.floor(from / columns)) break;
       if (!buttons[next].disabled) {
-        buttons[next].focus();
+        focusChoice(buttons[next], keyboard);
         break;
       }
     }
+    return true;
   }
 
-  return { openHome, handleKeydown, updatePresentation };
+  return {
+    openHome, handleKeydown, updatePresentation, back,
+    move(key) { if (highlighted) moveChoice(highlighted, key); },
+    confirm() { highlighted?.click(); }
+  };
 }

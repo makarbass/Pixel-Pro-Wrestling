@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#10121b">
   <meta name="description" content="Pixel wrestling with eight wrestlers and four arenas.">
   <title>Pixel Pro Wrestling</title>
@@ -115,12 +115,40 @@
           </div>
         </div>
 
+        <div class="gamepad" id="gamepad" role="group" aria-label="Game controller">
+          <div class="d-pad" role="group" aria-label="Direction pad">
+            <button type="button" data-direction="back" aria-label="Up" disabled>▲</button>
+            <button type="button" data-direction="left" aria-label="Left" disabled>◀</button>
+            <span class="d-pad-center" aria-hidden="true"></span>
+            <button type="button" data-direction="right" aria-label="Right" disabled>▶</button>
+            <button type="button" data-direction="front" aria-label="Down" disabled>▼</button>
+          </div>
+          <div class="joystick" role="group" aria-label="Movement joystick" hidden>
+            <span class="joystick-thumb" aria-hidden="true"></span>
+          </div>
+          <div class="face-buttons" role="group" aria-label="Action buttons">
+            <button type="button" data-face="X" disabled>X<span class="face-caption"></span></button>
+            <button type="button" data-face="Y" disabled>Y<span class="face-caption"></span></button>
+            <button type="button" data-face="A" disabled>A<span class="face-caption"></span></button>
+            <button type="button" data-face="B" disabled>B<span class="face-caption"></span></button>
+          </div>
+        </div>
+
         <div class="stage-footer" id="stage-footer" hidden>
           <span class="venue"><span aria-hidden="true"></span><strong id="venue-name">Judgment Day ’04</strong></span>
           <div class="pin-hint" id="pin-hint" hidden></div>
           <div class="pin-pressure" id="pin-pressure" role="meter" aria-label="Pin pressure" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden></div>
           <button class="button button-outline button-small" id="pause" type="button" hidden>Pause <kbd>Esc</kbd></button>
         </div>
+
+        <ul class="gamepad-guide" id="gamepad-guide" aria-label="Button combinations" hidden>
+          <li><kbd>A + X</kbd> <span id="gamepad-signature">Signature move</span> <span id="gamepad-cooldown"></span></li>
+          <li><kbd>B + X</kbd> Corner or ropes</li>
+          <li><kbd>B + Y</kbd> Block or grab rope</li>
+          <li><kbd>X + Y</kbd> Taunt</li>
+          <li><kbd>A + Y</kbd> Pause</li>
+          <li><kbd>A → B → B</kbd> or <kbd>A → A → B → B</kbd> Combo throw</li>
+        </ul>
       </section>
 
       <aside class="sidebar" aria-label="Controls">
@@ -140,7 +168,6 @@
             <div><dt>Pin or kick out</dt><dd><kbd>Space</kbd></dd></div>
             <div><dt>Taunt</dt><dd><kbd>T</kbd></dd></div>
           </dl>
-          <p class="controls-note">A keyboard is required to play.</p>
         </section>
       </aside>
     </div>

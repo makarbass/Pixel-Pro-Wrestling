@@ -6,6 +6,7 @@ import { drawPixelText } from './pixel-text.mjs';
 import { createMatchMenu } from './menu.mjs';
 import { createGameAudio } from './audio.mjs';
 import { contextAction, createGamepad, joystickJumpDirection } from './gamepad.mjs';
+import { createFighterProgress, getFighterProgress } from './fighter-progress.mjs';
 import { GRAPPLES, ROSTER, SIGNATURES } from './roster.mjs';
 import { advanceReferee, canRefereeCount, refereeHasLeft, REFEREE_ATTACK_LIMIT } from './referee.mjs';
 
@@ -15,6 +16,8 @@ const stage = canvas.parentElement;
 const menuRoot = get('match-menu');
 const soundToggle = get('sound-toggle');
 const soundState = get('sound-state');
+const combatHintsToggle = get('combat-hints-toggle');
+const combatHintsState = get('combat-hints-state');
 const scoreboard = get('scoreboard');
 const stageFooter = get('stage-footer');
 const pause = get('pause');
@@ -36,7 +39,7 @@ const gamepadRoot = get('gamepad');
 const gamepadGuide = get('gamepad-guide');
 const call = get('match-call');
 const pinHint = get('pin-hint');
-const pinPressure = get('pin-pressure');
+const fighterProgress = createFighterProgress(get('fighter-progress'), canvas, scoreboard);
 const announcement = get('announcement');
 const health = [get('player-meter'), get('bot-meter')];
 const avatars = [get('player-avatar'), get('bot-avatar')];
@@ -71,6 +74,8 @@ const gamepadBuffer = new Map();
 const gamepadLayout = window.matchMedia('(max-width: 760px), (any-pointer: coarse)');
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const audio = createGameAudio();
+const COMBAT_HINTS_PREFERENCE = 'pixel-pro-wrestling.combat-hints';
+let combatHints = readCombatHints();
 let selection;
 let match;
 let art;
@@ -188,6 +193,7 @@ function showOverlay(heading, body = '', primary = '', menu = true) {
 function setMode(next) {
   clearGamepadInput();
   mode = next;
+  if (mode !== 'fight') fighterProgress.hide();
   const onRing = mode === 'fight' || mode === 'paused' || mode === 'result';
   audio.setTrack(mode === 'fight' || mode === 'menu' ? 'crowd' : null);
   stage.classList.toggle('setup-stage', !onRing);
@@ -247,71 +253,67 @@ function updateCall(refereeMessage) {
   const callText = refereeMessage || (outside.elapsed > 0 && counting ? 'Outside' : '');
   if (call.textContent !== callText) call.textContent = callText;
   call.hidden = mode !== 'fight' || !callText;
-  pinPressure.hidden = mode !== 'fight' || !pin || Boolean(match.end);
-  if (!pinPressure.hidden) {
-    const pressure = String(Math.ceil(pin.pressure * 100));
-    if (pressure !== pinPressure.getAttribute('aria-valuenow')) {
-      pinPressure.style.setProperty('--pressure', pressure + '%');
-      pinPressure.setAttribute('aria-valuenow', pressure);
-    }
+  if (mode !== 'fight' || match.end) {
+    setFooterHint('');
+    return;
+  }
+
+  const [player, opponent] = match.fighters;
+  const { knockdown } = player;
+  const pinAvailable = canPin(match, 0);
+  const refereePinAvailable = canPinReferee(match, 0);
+  const refereeAction = referee.interaction;
+  const refereePinning = refereeAction?.index === 0 && refereeAction.phase === 'pin';
+  if (gamepadLayout.matches) {
+    const context = contextAction(match, pinAvailable || refereePinAvailable);
+    const escaping = pin?.attacker === 1 || hold?.index === 1;
+    let yLabel = player.health > 0 ? 'Block' : '';
+    if (context === 'pin') yLabel = escaping ? 'Escape' : knockdown ? 'Get up' : 'Pin';
+    gamepad.setLabel('Y', yLabel);
+    const clinch = hold || refereeAction;
+    gamepad.setLabel('B', clinch?.index === 0 && clinch.phase === 'clinch' ? 'Throw' : 'Grapple');
+  }
+  if (!combatHints || pin || knockdown) {
+    setFooterHint('');
+    return;
   }
 
   let hint = '';
-  if (mode === 'fight' && !match.end) {
-    const [player, opponent] = match.fighters;
-    const { knockdown } = player;
-    const pinAvailable = canPin(match, 0);
-    const refereePinAvailable = canPinReferee(match, 0);
-    const refereeAction = referee.interaction;
-    const refereePinning = refereeAction?.index === 0 && refereeAction.phase === 'pin';
-    const context = contextAction(match, pinAvailable || refereePinAvailable);
-    if (gamepadLayout.matches) {
-      const escaping = pin?.attacker === 1 || hold?.index === 1;
-      let yLabel = player.health > 0 ? 'Block' : '';
-      if (context === 'pin') yLabel = escaping ? 'Escape' : knockdown ? 'Get up' : 'Pin';
-      gamepad.setLabel('Y', yLabel);
-      const clinch = hold || refereeAction;
-      gamepad.setLabel('B', clinch?.index === 0 && clinch.phase === 'clinch' ? 'Throw' : 'Grapple');
+  const interaction = availableInteraction(player)?.name;
+  if (hold) {
+    if (hold.phase === 'clinch') {
+      if (hold.index === 1) hint = `${keys.pin} — Escape ${hold.escape}/${hold.needed}`;
+      else if (!hold.contact.signature && !hold.queued) hint = `${keys.throw} — Throw`;
     }
-    const interaction = availableInteraction(player)?.name;
-    if (pin) {
-      hint = pin.attacker === 0 ? `Tap ${keys.pin} to keep the pin` : `Tap ${keys.pin} to kick out`;
-      if (pin.attacker === 1 && canReachRopes(player)) hint += ` · ${keys.ropeBreak} — Grab the rope`;
-      if (!counting) hint += ' · No count';
-    } else if (knockdown) {
-      const seconds = Math.max(0, Math.ceil(knockdown.deadline - match.elapsed - 1e-8));
-      hint = `Tap ${keys.pin} to get up · ${knockdown.taps}/${knockdown.needed} · ${seconds}s`;
-    } else if (hold) {
-      if (hold.phase === 'clinch') {
-        if (hold.index === 1) hint = `${keys.pin} — Escape ${hold.escape}/${hold.needed}`;
-        else if (!hold.contact.signature && !hold.queued) hint = `${keys.throw} — Throw`;
-      }
-    } else if (refereeAction) {
-      if (refereeAction.index === 1) hint = `${keys.strike} — Interrupt`;
-      else if (refereePinning) hint = 'Pinning the referee · No count';
-      else if (refereeAction.phase === 'clinch' && !refereeAction.signature && !refereeAction.queued) {
-        hint = `${keys.throw} — Throw the referee`;
-      }
-    } else if (pinAvailable) {
-      hint = `Press ${keys.pin} to pin`;
-      if (opponent.knockdown) hint += ` · ${Math.ceil(opponent.knockdown.deadline - match.elapsed - 1e-8)}s to get up`;
-    } else if (refereePinAvailable) {
-      hint = `${keys.pin} — Pin the referee`;
-    } else if (match.fighters[1].attack?.name === 'shove' && player.pose === 'perch') {
-      hint = `Shove incoming · ${keys.jump} — Dive`;
-    } else if (player.motion?.kind === 'jump' && !player.motion.strike) {
-      hint = `${keys.strike} — Air strike`;
-    } else if (interaction === 'descend') {
-      hint = `${keys.jump} — Dive · ${keys.interact} — Climb down`;
-    } else if (interaction) {
-      hint = `${keys.interact} — ${interactionNames[interaction]}`;
-    } else if (player.rush && !player.rush.queued) {
-      hint = `${keys.strike} — Running strike`;
-    } else if (player.combo) {
-      hint = player.combo.hits === 2 ? `${keys.throw} — Finish combo` : `${keys.strike} or ${keys.throw} — Continue combo`;
+  } else if (refereeAction) {
+    if (refereeAction.index === 1) hint = `${keys.strike} — Interrupt`;
+    else if (refereePinning) hint = 'Pinning the referee · No count';
+    else if (refereeAction.phase === 'clinch' && !refereeAction.signature && !refereeAction.queued) {
+      hint = `${keys.throw} — Throw the referee`;
     }
-    if (!hint && refereeHasLeft(referee)) hint = 'Stamina decides at the time limit';
+  } else if (pinAvailable) {
+    hint = `Press ${keys.pin} to pin`;
+    if (opponent.knockdown) hint += ` · ${Math.ceil(opponent.knockdown.deadline - match.elapsed - 1e-8)}s to get up`;
+  } else if (refereePinAvailable) {
+    hint = `${keys.pin} — Pin the referee`;
+  } else if (opponent.attack?.name === 'shove' && player.pose === 'perch') {
+    hint = `Shove incoming · ${keys.jump} — Dive`;
+  } else if (player.motion?.kind === 'jump' && !player.motion.strike) {
+    hint = `${keys.strike} — Air strike`;
+  } else if (interaction === 'descend') {
+    hint = `${keys.jump} — Dive · ${keys.interact} — Climb down`;
+  } else if (interaction) {
+    hint = `${keys.interact} — ${interactionNames[interaction]}`;
+  } else if (player.rush && !player.rush.queued) {
+    hint = `${keys.strike} — Running strike`;
+  } else if (player.combo) {
+    hint = player.combo.hits === 2 ? `${keys.throw} — Finish combo` : `${keys.strike} or ${keys.throw} — Continue combo`;
   }
+  if (!hint && refereeHasLeft(referee)) hint = 'Stamina decides at the time limit';
+  setFooterHint(hint);
+}
+
+function setFooterHint(hint) {
   if (pinHint.textContent !== hint) pinHint.textContent = hint;
   pinHint.hidden = !hint;
 }
@@ -319,17 +321,20 @@ function updateCall(refereeMessage) {
 function render() {
   let message = '';
   const refereeMessage = refereeCall();
+  const progress = mode === 'fight' ? getFighterProgress(match, controlLabels[controlScheme]) : null;
   if (mode === 'fight' && !refereeMessage) {
     if (match.pin && match.pin.count === 0 && (canRefereeCount(match.referee) || match.pin.elapsed < 0.65)) message = 'PIN';
     else if (match.elapsed < 0.65 && !match.outside.elapsed && !match.pin) message = 'FIGHT!';
   }
-  draw(selection.arena, match, !reducedMotion.matches, {
+  const anchor = draw(selection.arena, match, !reducedMotion.matches, {
     reducedMotion: reducedMotion.matches,
     presentation: resultDisplayTime,
-    call: message
+    call: message,
+    progressFighter: progress?.fighter
   });
   updateScore();
   updateCall(refereeMessage);
+  fighterProgress.show(progress, anchor, combatHints);
 }
 
 function clearKeyboardInput() {
@@ -415,16 +420,19 @@ function tick(now) {
       describe('The referee is back on his feet.');
     } else if (match.pin !== previousPin) {
       if (!match.pin) describe(match.pinBreak === 'rope' ? 'Rope break. The pin ended.' : 'The pin was broken.');
-      else if (match.pin.attacker === 0) describe(`Pin. Tap ${keys.pin} to keep the pin.`);
-      else {
-        const player = match.fighters[0];
-        const rope = canReachRopes(player) ? ` Press ${keys.ropeBreak} to grab the rope.` : '';
+      else if (match.pin.attacker === 0) describe(combatHints ? `Pin. Tap ${keys.pin} to keep the pin.` : 'Pin.');
+      else if (combatHints) {
+        const rope = canReachRopes(match.fighters[0]) ? ` Press ${keys.ropeBreak} to grab the rope.` : '';
         describe(`Your opponent is pinning you. Tap ${keys.pin} to kick out.${rope}`);
+      } else {
+        describe('Your opponent is pinning you.');
       }
     } else if (match.pin && match.pin.count > previousPinCount) {
       describe(`Pin count ${match.pin.count}.`);
     } else if (match.fighters[0].knockdown && match.fighters[0].knockdown !== previousKnockdown) {
-      describe(`Knockdown. Tap ${keys.pin} ${match.fighters[0].knockdown.needed} times to get up. You have four seconds.`);
+      describe(combatHints ?
+        `Knockdown. Tap ${keys.pin} ${match.fighters[0].knockdown.needed} times to get up. You have four seconds.` :
+        'Knockdown.');
     } else if (previousKnockdown && match.fighters[0].pose === 'rise') {
       describe('Getting up.');
     } else if (match.fighters[0].motion?.kind === 'fall' && match.fighters[0].motion !== previousMotion) {
@@ -436,8 +444,10 @@ function tick(now) {
     } else if (match.outside.count > previousCount) {
       describe(`Countout ${match.outside.count}.`);
     } else if (match.hold !== previousHold && match.hold) {
-      if (match.hold.index === 1) describe(`Grapple. Tap ${keys.pin} ${match.hold.needed} times to escape.`);
-      else describe(match.hold.contact.signature ? 'Signature grapple.' : `Grapple. Press ${keys.throw} to throw.`);
+      if (match.hold.contact.signature && (match.hold.index === 0 || !combatHints)) describe('Signature grapple.');
+      else if (!combatHints) describe('Grapple.');
+      else if (match.hold.index === 1) describe(`Grapple. Tap ${keys.pin} ${match.hold.needed} times to escape.`);
+      else describe(`Grapple. Press ${keys.throw} to throw.`);
     } else if (match.hold?.phase === 'throw' && previousHoldPhase === 'clinch') {
       describe('Throw.');
     } else if (previousHoldPhase === 'clinch' && !match.hold) {
@@ -566,11 +576,35 @@ function showSoundSetting() {
   soundState.textContent = audio.enabled ? 'On' : 'Off';
 }
 
+function readCombatHints() {
+  try {
+    return window.localStorage.getItem(COMBAT_HINTS_PREFERENCE) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+function showCombatHintsSetting() {
+  combatHintsToggle.setAttribute('aria-pressed', String(combatHints));
+  combatHintsState.textContent = combatHints ? 'On' : 'Off';
+}
+
 showSoundSetting();
 soundToggle.addEventListener('click', () => {
   audio.setEnabled(!audio.enabled);
   showSoundSetting();
   if (audio.enabled) audio.activate();
+});
+
+showCombatHintsSetting();
+combatHintsToggle.addEventListener('click', () => {
+  combatHints = !combatHints;
+  showCombatHintsSetting();
+  try {
+    window.localStorage.setItem(COMBAT_HINTS_PREFERENCE, combatHints ? 'on' : 'off');
+  } catch {
+    // Keep the setting for the current session when storage is unavailable.
+  }
 });
 
 pause.addEventListener('click', pauseFight);

@@ -83,6 +83,12 @@ function actorPosition(arena, actor) {
   return point.map(Math.round);
 }
 
+function spriteBounds(actor) {
+  const [x, y] = actor.position;
+  const { rect: [, , width, height], pivot: [anchorX, anchorY] } = actor.frame;
+  return { x: x - (actor.facing === 1 ? anchorX : width - anchorX), y: y - anchorY, width, height };
+}
+
 function frameAt(clip, time, repeat) {
   if (clip.length === 1) return clip[0];
   const duration = clip.reduce((sum, frame) => sum + frame.duration, 0);
@@ -247,11 +253,13 @@ export function createRenderer(canvas, art) {
   }
 
   function drawCount(arena, referee, count, isPin) {
-    if (!count) return;
+    if (!count) return null;
     const [refX, refY] = actorPosition(arena, referee);
     const center = clamp(refX + referee.facing * (isPin ? 15 : 22), 12, arena.size[0] - 12);
     const baseline = Math.max(8, refY - (isPin ? 26 : 41)) + 10;
-    drawPixelText(ctx, String(count), center, baseline, 2);
+    const digits = String(count);
+    drawPixelText(ctx, digits, center, baseline, 2);
+    return { x: center - digits.length * 6, y: baseline - 14, width: digits.length * 12, height: 15 };
   }
 
   function drawImpact(arena, impact, elapsed, reducedMotion) {
@@ -273,7 +281,7 @@ export function createRenderer(canvas, art) {
     }
   }
 
-  return function draw(id, match, animateCrowd, { reducedMotion = false, presentation = 0, call = '' } = {}) {
+  return function draw(id, match, animateCrowd, { reducedMotion = false, presentation = 0, call = '', progressFighter } = {}) {
     const arena = art.arenas[id];
     const [width, height] = arena.size;
     if (canvas.width !== width || canvas.height !== height) {
@@ -302,6 +310,7 @@ export function createRenderer(canvas, art) {
     if (referee.phase !== 'gone') actors.push(referee);
     for (const actor of actors) placeSprite(arena, actor);
     alignHold(match, actors);
+    const anchor = progressFighter === undefined ? null : spriteBounds(actors[progressFighter]);
     actors.sort((a, b) => a.depth - b.depth);
 
     for (const actor of actors) drawShadow(arena, actor);
@@ -324,9 +333,9 @@ export function createRenderer(canvas, art) {
     for (const impact of match.impacts) {
       if (impact.until > match.elapsed + presentation) drawImpact(arena, impact, match.elapsed + presentation, reducedMotion);
     }
-    if (canRefereeCount(referee)) {
-      drawCount(arena, referee, match.pin?.count ?? match.outside.count, Boolean(match.pin));
-    }
+    const count = canRefereeCount(referee)
+      ? drawCount(arena, referee, match.pin?.count ?? match.outside.count, Boolean(match.pin)) : null;
     if (call) drawPixelText(ctx, call, width / 2, Math.round(height * 0.47), 3);
+    return anchor && { fighter: anchor, count };
   };
 }

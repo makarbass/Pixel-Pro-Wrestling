@@ -552,20 +552,53 @@ h1, h2, p { margin: 0; }
   text-align: center;
 }
 
-.pin-pressure {
-  position: relative;
-  flex: 1 0 100%;
-  height: 9px;
-  border: 1px solid #747687;
-  background: #14151c;
+.fighter-progress {
+  --progress-accent: var(--gold);
+  position: absolute;
+  inset: 0 auto auto 0;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  inline-size: max-content;
+  min-inline-size: min(80px, var(--progress-max-width));
+  max-inline-size: var(--progress-max-width);
+  padding: 3px 5px;
+  border: 1px solid #706983;
+  background: #171725;
+  color: #f1eee6;
+  clip-path: polygon(2px 0, calc(100% - 2px) 0, 100% 2px, 100% calc(100% - 2px),
+    calc(100% - 2px) 100%, 2px 100%, 0 calc(100% - 2px), 0 2px);
+  pointer-events: none;
+  font-size: 0.75rem;
+  line-height: 1.15;
+  text-align: center;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
 }
 
-.pin-pressure::before {
-  position: absolute;
-  inset: 1px auto 1px 1px;
-  width: min(var(--pressure, 100%), calc(100% - 2px));
-  background: #ffcf70;
-  content: "";
+.fighter-progress[data-kind="rise"] { --progress-accent: var(--blue); }
+.fighter-progress-instruction, .fighter-progress-detail { margin: 0; }
+.fighter-progress-detail { color: #d2ccdf; }
+
+.fighter-progress-meter {
+  inline-size: min(80px, 100%);
+  block-size: 9px;
+  border: 1px solid var(--progress-accent);
+  padding: 1px;
+  background: #272538;
+}
+
+.fighter-progress-meter span {
+  display: block;
+  block-size: 100%;
+  background: var(--progress-accent);
+  mask-image: repeating-linear-gradient(90deg, #000 0 8%, transparent 8% 10%);
+  clip-path: inset(0 calc(100% - var(--progress-fill, 0%)) 0 0);
+}
+
+@media (forced-colors: active) {
+  .fighter-progress-meter span { background: Highlight; forced-color-adjust: none; }
 }
 
 .stage-footer {

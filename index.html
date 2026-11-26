@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#10121b">
+  <meta name="description" content="Pixel wrestling with eight wrestlers and four arenas.">
+  <title>Pixel Pro Wrestling</title>
+  <link rel="icon" href="assets/icon.png" type="image/png">
+  <link rel="preload" href="assets/ring-pixels.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="game.css">
+  <script type="module" src="game.mjs"></script>
+</head>
+<body>
+  <main class="shell">
+    <h1 class="sr-only">Pixel Pro Wrestling</h1>
+
+    <div class="layout">
+      <section class="game" aria-label="Game">
+        <div class="stage setup-stage">
+          <canvas id="ring" hidden width="320" height="234" tabindex="-1" aria-label="Ring" aria-describedby="controls-keys"></canvas>
+          <div class="scoreboard" id="scoreboard" hidden>
+            <div class="fighter fighter-player">
+              <img class="fighter-avatar" id="player-avatar" width="22" height="21" alt="">
+              <div class="health" id="player-meter" role="meter" aria-label="Player stamina" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100"><span></span></div>
+            </div>
+            <div class="scoreboard-time">
+              <time id="timer" datetime="PT2M">
+                <span class="sr-only">Time remaining <span id="timer-value">02:00</span></span>
+                <canvas class="timer-face" id="timer-face" width="54" height="18" aria-hidden="true"></canvas>
+              </time>
+            </div>
+            <div class="fighter fighter-bot">
+              <img class="fighter-avatar" id="bot-avatar" width="22" height="21" alt="">
+              <div class="health" id="bot-meter" role="meter" aria-label="Opponent stamina" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100"><span></span></div>
+            </div>
+          </div>
+          <div class="match-call" id="match-call" aria-hidden="true" hidden>Outside</div>
+          <div class="match-menu" id="match-menu" hidden>
+            <canvas class="menu-backdrop" id="menu-backdrop" aria-hidden="true" hidden></canvas>
+            <section class="menu-home" data-screen="home" aria-label="Main Menu">
+              <p class="menu-title" aria-hidden="true">Pixel Pro <span>Wrestling</span></p>
+              <div class="menu-options" data-menu-columns="1">
+                <button class="menu-option" type="button" data-action="presets">Preset Match <span aria-hidden="true">▶</span></button>
+                <button class="menu-option" type="button" data-action="custom">Custom Match <span aria-hidden="true">▶</span></button>
+                <button class="menu-option" type="button" data-action="settings">Settings <span aria-hidden="true">▶</span></button>
+              </div>
+              <div class="credits">
+                <p>ART AND SOUND BY <a href="https://www.behance.net/gallery/58997495/PIXEL-PRO-WRESTLING">IVAN GLOBIN</a></p>
+                <p>Code by Codex · Version 0.0.1</p>
+                <p><a href="https://github.com/makarbass/Pixel-Pro-Wrestling">Contribute on GitHub</a></p>
+              </div>
+            </section>
+            <section class="menu-page" data-screen="settings" aria-labelledby="settings-heading" hidden>
+              <div class="menu-header">
+                <h2 id="settings-heading">Settings</h2>
+                <button class="button button-outline button-small" type="button" data-action="back">Back</button>
+              </div>
+              <div class="menu-options settings-options" data-menu-columns="1">
+                <button class="menu-option" id="sound-toggle" type="button" data-action="sound" aria-pressed="true">
+                  Sound <span id="sound-state" aria-hidden="true">On</span>
+                </button>
+              </div>
+            </section>
+            <section class="menu-page" data-screen="presets" aria-labelledby="preset-heading" hidden>
+              <div class="menu-header">
+                <h2 id="preset-heading">Preset Match</h2>
+                <button class="button button-outline button-small" type="button" data-action="back">Back</button>
+              </div>
+              <div class="match-tiles" id="preset-tiles" data-menu-columns="2"></div>
+            </section>
+            <section class="menu-page" data-screen="roster" aria-labelledby="roster-heading" hidden>
+              <div class="menu-header">
+                <h2 id="roster-heading">Choose your wrestler</h2>
+                <button class="button button-outline button-small" type="button" data-action="back">Back</button>
+              </div>
+              <div class="roster-tiles" id="roster-tiles" data-menu-columns="4"></div>
+              <dl class="roster-picks">
+                <div><dt>Your wrestler</dt><dd id="picked-player">—</dd></div>
+                <div><dt>Opponent</dt><dd id="picked-opponent">—</dd></div>
+              </dl>
+            </section>
+            <section class="menu-page" data-screen="arenas" aria-labelledby="arena-heading" hidden>
+              <div class="menu-header">
+                <h2 id="arena-heading">Choose an arena</h2>
+                <button class="button button-outline button-small" type="button" data-action="back">Back</button>
+              </div>
+              <div class="match-tiles" id="arena-tiles" data-menu-columns="2"></div>
+            </section>
+            <section class="versus" data-screen="versus" aria-labelledby="versus-arena" hidden>
+              <h2 id="versus-arena" tabindex="-1" aria-describedby="versus-player-name versus-opponent-name"></h2>
+              <div class="versus-card">
+                <div class="versus-fighter versus-player">
+                  <span class="versus-art" id="versus-player-art"></span>
+                  <p id="versus-player-name"></p>
+                </div>
+                <p class="versus-mark" aria-hidden="true">VS</p>
+                <div class="versus-fighter versus-opponent">
+                  <span class="versus-art" id="versus-opponent-art"></span>
+                  <p id="versus-opponent-name"></p>
+                </div>
+              </div>
+              <p class="versus-count" id="versus-count">Fight in 7</p>
+            </section>
+          </div>
+          <div class="overlay" id="overlay">
+            <div class="overlay-card">
+              <h2 id="overlay-heading">Loading arena</h2>
+              <p id="overlay-text" hidden></p>
+              <div class="overlay-actions" id="overlay-actions" hidden>
+                <button class="button button-primary" id="overlay-primary" type="button"></button>
+                <button class="button button-outline" id="overlay-menu" type="button">Main Menu</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="gamepad" id="gamepad" role="group" aria-label="Game controller">
+          <div class="d-pad" role="group" aria-label="Direction pad">
+            <button type="button" data-direction="back" aria-label="Up" disabled>▲</button>
+            <button type="button" data-direction="left" aria-label="Left" disabled>◀</button>
+            <span class="d-pad-center" aria-hidden="true"></span>
+            <button type="button" data-direction="right" aria-label="Right" disabled>▶</button>
+            <button type="button" data-direction="front" aria-label="Down" disabled>▼</button>
+          </div>
+          <div class="joystick" role="group" aria-label="Movement joystick" hidden>
+            <span class="joystick-thumb" aria-hidden="true"></span>
+          </div>
+          <div class="face-buttons" role="group" aria-label="Action buttons">
+            <button type="button" data-face="X" disabled>X<span class="face-caption"></span></button>
+            <button type="button" data-face="Y" disabled>Y<span class="face-caption"></span></button>
+            <button type="button" data-face="A" disabled>A<span class="face-caption"></span></button>
+            <button type="button" data-face="B" disabled>B<span class="face-caption"></span></button>
+          </div>
+        </div>
+
+        <div class="stage-footer" id="stage-footer" hidden>
+          <span class="venue"><span aria-hidden="true"></span><strong id="venue-name">Judgment Day ’04</strong></span>
+          <div class="pin-hint" id="pin-hint" hidden></div>
+          <div class="pin-pressure" id="pin-pressure" role="meter" aria-label="Pin pressure" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden></div>
+          <button class="button button-outline button-small" id="pause" type="button" hidden>Pause <kbd>Esc</kbd></button>
+        </div>
+
+        <ul class="gamepad-guide" id="gamepad-guide" aria-label="Button combinations" hidden>
+          <li><kbd>A + X</kbd> <span id="gamepad-signature">Signature move</span> <span id="gamepad-cooldown"></span></li>
+          <li><kbd>B + X</kbd> Corner or ropes</li>
+          <li><kbd>B + Y</kbd> Block or grab rope</li>
+          <li><kbd>X + Y</kbd> Taunt</li>
+          <li><kbd>A + Y</kbd> Pause</li>
+          <li><kbd>A → B → B</kbd> or <kbd>A → A → B → B</kbd> Combo throw</li>
+        </ul>
+      </section>
+
+      <aside class="sidebar" aria-label="Controls">
+        <section class="controls" aria-labelledby="controls-heading">
+          <h2 id="controls-heading">Controls</h2>
+          <p class="menu-keys">Menu <kbd>←↑↓→</kbd> <kbd>Enter</kbd> <kbd>Esc</kbd></p>
+          <dl id="controls-keys">
+            <div><dt>Move</dt><dd><kbd>WASD</kbd> <span>/</span> <kbd>←↑↓→</kbd></dd></div>
+            <div><dt>Jump</dt><dd><kbd>I</kbd></dd></div>
+            <div><dt>Corner or ring ropes</dt><dd><kbd>E</kbd></dd></div>
+            <div><dt>Strike on the mat or in the air</dt><dd><kbd>J</kbd></dd></div>
+            <div><dt>Grapple</dt><dd><kbd>K</kbd></dd></div>
+            <div><dt id="grapple-name">Throw</dt><dd><kbd>K</kbd> <span>again</span></dd></div>
+            <div><dt id="signature-name">Signature move</dt><dd><kbd>Shift</kbd><span> + </span><kbd>J</kbd> <span id="signature-cooldown"></span></dd></div>
+            <div><dt>Combo</dt><dd><kbd>J → K → K</kbd> <span>/</span> <kbd>J → J → K → K</kbd></dd></div>
+            <div><dt>Block or grab the rope</dt><dd><kbd>L</kbd></dd></div>
+            <div><dt>Get up, pin or kick out</dt><dd><kbd>Space</kbd></dd></div>
+            <div><dt>Taunt</dt><dd><kbd>T</kbd></dd></div>
+          </dl>
+        </section>
+      </aside>
+    </div>
+
+    <p class="sr-only" id="announcement" role="status" aria-atomic="true"></p>
+  </main>
+</body>
+</html>

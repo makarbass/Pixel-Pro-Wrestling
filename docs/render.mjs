@@ -1,6 +1,7 @@
 import { RING, FLOOR, clamp } from './arena.mjs';
 import { attackTimeline } from './match.mjs';
 import { drawPixelText } from './pixel-text.mjs';
+import { canRefereeCount } from './referee.mjs';
 import { ROSTER } from './roster.mjs';
 
 const asset = (name) => new URL(`assets/${name}`, import.meta.url);
@@ -130,14 +131,33 @@ function isInFront(actor) {
 
 function refereePose(match, presentation) {
   const { pin, outside, referee } = match;
+  if (!canRefereeCount(referee)) return referee.moving ? 'walk' : 'idle';
   if (pin) {
     if (pin.count === 3 && presentation >= 0.14) return 'finish';
-    if (pin.count > 0 && pin.elapsed - pin.count + presentation < 0.13) return 'slap';
+    if (pin.count > 0 && pin.elapsed - (pin.paused ?? 0) - pin.count + presentation < 0.13) return 'slap';
     return 'ready';
   }
-  if (outside.elapsed > 0 && (outside.count === 10 || outside.elapsed % 1 >= 0.66 ||
-      (outside.count > 0 && outside.elapsed % 1 < 0.15))) return 'count';
+  const countTime = outside.elapsed - (outside.paused ?? 0);
+  if (countTime > 0 && (outside.count === 10 || countTime % 1 >= 0.66 ||
+      (outside.count > 0 && countTime % 1 < 0.15))) return 'count';
   return referee.moving ? 'walk' : 'idle';
+}
+
+function refereeTilt(referee, time, reducedMotion) {
+  if (referee.phase === 'staggered') return -0.23;
+  if (referee.phase === 'held') {
+    const { phase, elapsed, duration } = referee.interaction;
+    return phase === 'throw' ? -Math.PI / 2 * clamp(elapsed / duration, 0, 1) : -0.17;
+  }
+  if (referee.phase === 'down') {
+    const fall = reducedMotion ? 1 : clamp((time - referee.changedAt + 0.035) / 0.12, 0, 1);
+    return -Math.PI / 2 * fall;
+  }
+  if (referee.phase === 'fleeing') {
+    const standing = clamp((time - referee.changedAt) / referee.escape[0].duration, 0, 1);
+    return -Math.PI / 2 * (1 - standing);
+  }
+  return 0;
 }
 
 function poseTime(match, actor, strides) {
@@ -149,8 +169,9 @@ function poseTime(match, actor, strides) {
       ? time / impact * 0.40
       : 0.40 + Math.max(0, time - impact) / (duration - impact) * 0.60;
   }
-  if (match.hold && (actor.pose === 'grappling' || actor.pose.startsWith('caught'))) {
-    return match.hold.elapsed / match.hold.duration;
+  const hold = match.hold || match.referee.interaction;
+  if (hold && (actor.pose === 'grappling' || actor.pose.startsWith('caught'))) {
+    return hold.elapsed / hold.duration;
   }
   if (actor.motion) return actor.motion.elapsed / actor.motion.duration;
   if (actor.pose === 'walk') return actor.strideDistance / (strides?.[actor.id] ?? 28);
@@ -204,6 +225,14 @@ export function createRenderer(canvas, art) {
     ctx.save();
     ctx.translate(x, y);
     ctx.scale(actor.facing, 1);
+    if (actor.tilt) {
+      const centerX = width / 2 - anchorX;
+      const centerY = height / 2 - anchorY;
+      const descent = Math.abs(Math.sin(actor.tilt)) * (height - width) / 2;
+      ctx.translate(centerX, centerY + descent);
+      ctx.rotate(actor.tilt);
+      ctx.translate(-centerX, -centerY);
+    }
     ctx.drawImage(art.atlas, sx, sy, width, height, -anchorX, -anchorY, width, height);
     ctx.restore();
   }
@@ -255,18 +284,22 @@ export function createRenderer(canvas, art) {
     const frame = animateCrowd ? Math.floor(match.crowdTime / duration) % frames : 0;
     drawArenaBackdrop(ctx, arena, frame);
 
+    const refereeInteraction = match.referee.interaction;
+    const pinning = match.pin?.attacker ?? (refereeInteraction?.phase === 'pin' ? refereeInteraction.index : null);
     const actors = match.fighters.map((fighter, index) => ({
       ...fighter,
       name: fighter.id,
       animationTime: poseTime(match, fighter, art.strides),
       repeat: ['idle', 'walk', 'clinch', 'held'].includes(fighter.pose),
-      depth: fighter.z + (match.pin?.attacker === index ? 0.05 : 0)
+      depth: fighter.z + (pinning === index ? 0.05 : 0)
     }));
+    const refereeTime = match.elapsed + presentation;
     const referee = {
-      ...match.referee, name: 'ref', animationTime: match.elapsed, pose: refereePose(match, presentation),
+      ...match.referee, name: 'ref', animationTime: refereeTime * (match.referee.phase === 'fleeing' ? 1.85 : 1),
+      pose: refereePose(match, presentation), tilt: refereeTilt(match.referee, refereeTime, reducedMotion),
       repeat: true, depth: match.referee.z
     };
-    actors.push(referee);
+    if (referee.phase !== 'gone') actors.push(referee);
     for (const actor of actors) placeSprite(arena, actor);
     alignHold(match, actors);
     actors.sort((a, b) => a.depth - b.depth);
@@ -291,7 +324,9 @@ export function createRenderer(canvas, art) {
     for (const impact of match.impacts) {
       if (impact.until > match.elapsed + presentation) drawImpact(arena, impact, match.elapsed + presentation, reducedMotion);
     }
-    drawCount(arena, referee, match.pin?.count ?? match.outside.count, Boolean(match.pin));
+    if (canRefereeCount(referee)) {
+      drawCount(arena, referee, match.pin?.count ?? match.outside.count, Boolean(match.pin));
+    }
     if (call) drawPixelText(ctx, call, width / 2, Math.round(height * 0.47), 3);
   };
 }

@@ -11,8 +11,10 @@ const CHORDS = {
 };
 export const FACE_ACTIONS = { A: 'strike', B: 'throw', X: 'jump', Y: 'context' };
 
-export function contextAction({ pin, hold }, pinAvailable) {
-  return pin || (hold?.index === 1 && hold.phase === 'clinch') || pinAvailable ? 'pin' : 'guard';
+export function contextAction({ pin, hold, referee, fighters }, pinAvailable) {
+  const refereePin = referee?.interaction;
+  return pin || fighters?.[0]?.knockdown || (hold?.index === 1 && hold.phase === 'clinch') ||
+    (refereePin?.index === 0 && refereePin.phase === 'pin') || pinAvailable ? 'pin' : 'guard';
 }
 
 export function createFaceInput(onPress, onRelease, clock = globalThis, now = () => performance.now()) {

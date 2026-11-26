@@ -3,12 +3,15 @@ import {
   edgePressed, contactAlong, inward, gatesNear, walkDistance
 } from './arena.mjs';
 import { GRAPPLES, SIGNATURES, TACTICS } from './roster.mjs';
+import { advanceReferee, canHitReferee, canRefereeCount, createReferee, hitReferee,
+  knockRefereeDown, refereeHasLeft, walkRefereeAroundFighters } from './referee.mjs';
 
 export { RING } from './arena.mjs';
 export const STEP = 1 / 60;
 export const MATCH_SECONDS = 120;
 export const OUTSIDE_COUNT = 10;
 export const escapePresses = (health) => escapeThreshold(health, 8, 6);
+export const getUpPresses = (health) => Math.round(4 + 6 * (1 - health / 100));
 
 const EPSILON = 1e-8;
 const GRAVITY = 340;
@@ -29,11 +32,21 @@ const CLINCH_LIMIT = 1.8;
 const CLINCH_WINDUP = 0.5;
 const SIGNATURE_CLINCH = 0.7;
 const BOT_CLINCH_FINISH = 0.94;
+const REFEREE_PIN_TIME = 1.5;
+const REFEREE_BOT_INTERVAL = 10;
+const REFEREE_BOT_CHANCE = 0.2;
 const PIN_RELEASE_TIME = 2.4;
 const PIN_PRESSURE_PER_TAP = 0.18;
 const BOT_PIN_TAP_INTERVAL = 0.45;
 const FRESH_DEFENDER_HEALTH = 80;
 const FRESH_BOT_KICK_OUT_TIME = 1.65;
+const GET_UP_TIME = 4;
+const RISE_TIME = 0.36;
+const WEAK_STRIKE_COOLDOWN = 1.2;
+const GROUND_JUMP_TIME = 0.55;
+const CORNER_CLIMB_TIME = 0.48;
+const BOT_DIVE_DELAY = 0.18;
+const BOT_FOLLOW_UP_DELAY = 0.8;
 const BOT_HOME = {
   rush: { x: 116, z: 29 }, grapple: { x: 121, z: 26 },
   corner: { x: 124, z: 33 }, taunt: { x: 122, z: 23 }
@@ -59,9 +72,9 @@ function impactDamage(base, power = 1) {
 function wrestler(id, x, facing) {
   return {
     id, x, z: RING.depth / 2, facing, height: RING.height, surface: 'mat',
-    health: 100, pose: 'idle', age: 0, attack: null, recover: 0,
+    health: 100, pose: 'idle', age: 0, attack: null, recover: 0, knockdown: null,
     motion: null, corner: null, lean: null, rush: null, tauntCooldown: 0,
-    signatureCooldown: 0, combo: null, strideDistance: 0, gait: 'walk'
+    signatureCooldown: 0, weakStrikeCooldown: 0, combo: null, strideDistance: 0, gait: 'walk'
   };
 }
 
@@ -75,11 +88,12 @@ export function createMatch(player = 'booker', opponent = 'taker', { random = Ma
     pinBreak: null,
     hold: null,
     impacts: [],
-    outside: { elapsed: 0, count: 0 },
+    outside: { elapsed: 0, paused: 0, count: 0 },
     ropes: Object.fromEntries(EDGES.map((edge) => [edge, { flex: 0, position: 0.5 }])),
     end: null,
-    referee: { x: RING.width / 2, z: 4, height: RING.height, facing: -1, moving: false },
-    bot: { cooldown: 0.30, style: TACTICS[opponent] || 'grapple', random, plan: null, counter: 0 }
+    referee: createReferee(),
+    bot: { cooldown: 0.30, style: TACTICS[opponent] || 'grapple', random, plan: null, counter: 0,
+      nextRefereeAttempt: REFEREE_BOT_INTERVAL, refereePlan: null }
   };
 }
 
@@ -89,6 +103,24 @@ function setPose(fighter, pose) {
     fighter.age = 0;
     if (pose === 'walk') fighter.strideDistance = 0;
   }
+}
+
+function knockDown(match, fighter) {
+  const fatigue = 1 - fighter.health / 100;
+  fighter.knockdown = { startedAt: match.elapsed, deadline: match.elapsed + GET_UP_TIME,
+    taps: 0, needed: getUpPresses(fighter.health), followUp: null };
+  if (fighter === match.fighters[1]) {
+    fighter.knockdown.nextBotTap = 0.4;
+    fighter.knockdown.botTapInterval = 0.25 + 0.1 * fatigue + 0.12 * match.bot.random();
+  }
+  fighter.recover = 0;
+  setPose(fighter, 'down');
+}
+
+function startRise(fighter) {
+  fighter.knockdown = null;
+  fighter.recover = RISE_TIME;
+  setPose(fighter, 'rise');
 }
 
 function inRange(a, b, reach, depth) {
@@ -107,12 +139,12 @@ function grounded(fighter) {
 
 function canAct(fighter) {
   return grounded(fighter) && !fighter.motion && !fighter.attack &&
-    fighter.recover === 0 && fighter.pose !== 'taunt' &&
+    fighter.recover === 0 && fighter.pose !== 'taunt' && fighter.pose !== 'down' &&
     fighter.pose !== 'clinch' && fighter.pose !== 'held' &&
     fighter.pose !== 'grappling' && !fighter.pose.startsWith('caught');
 }
 
-const speedFactor = (fighter) => 0.62 + 0.38 * fighter.health / 100;
+const speedFactor = (fighter) => fighter.health === 0 ? 0.30 : 0.62 + 0.38 * fighter.health / 100;
 const powerFactor = (fighter) => 0.55 + 0.45 * fighter.health / 100;
 export function attackTimeline(fighter) {
   if (!fighter.attack) return null;
@@ -145,7 +177,7 @@ function routeToGate(fighter, target = fighter) {
 export function availableInteraction(fighter) {
   if (fighter.corner && !fighter.motion) return { name: 'descend' };
   if (!canAct(fighter)) return null;
-  if (fighter.surface === 'mat') {
+  if (fighter.surface === 'mat' && fighter.health > 0) {
     const corner = nearCorner(fighter);
     if (corner) return { name: 'climb', corner };
   }
@@ -173,7 +205,7 @@ function interact(fighter, action) {
       const corner = action.corner;
       fighter.corner = corner;
       fighter.facing = inward(corner.side).x;
-      beginMotion(fighter, 'climb', corner, 'mat', RING.height + RING.cornerHeight, 0.48);
+      beginMotion(fighter, 'climb', corner, 'mat', RING.height + RING.cornerHeight, CORNER_CLIMB_TIME);
       return;
     }
     case 'descend': {
@@ -211,17 +243,18 @@ function cornerLanding(corner, x, z) {
   return { target: matPoint(landingX, landingZ), surface: 'mat', duration: 0.76 };
 }
 
+function groundJumpTarget(fighter, x, z) {
+  const length = Math.max(1, Math.hypot(x, z));
+  const distance = GROUND_JUMP_TIME * speedFactor(fighter) / length;
+  return surfacePoint(fighter, fighter.x + x * WALK.x * distance, fighter.z + z * WALK.z * distance);
+}
+
 function beginJump(fighter, command) {
   const x = command.x || 0;
   const z = command.z || 0;
   const corner = fighter.corner;
-  const durationOnGround = 0.55;
-  const length = Math.max(1, Math.hypot(x, z));
-  const distance = durationOnGround * speedFactor(fighter) / length;
   const { target, surface, duration } = corner ? cornerLanding(corner, x, z) : {
-    target: surfacePoint(fighter, fighter.x + x * WALK.x * distance, fighter.z + z * WALK.z * distance),
-    surface: fighter.surface,
-    duration: durationOnGround
+    target: groundJumpTarget(fighter, x, z), surface: fighter.surface, duration: GROUND_JUMP_TIME
   };
   if (target.x !== fighter.x) fighter.facing = Math.sign(target.x - fighter.x);
   fighter.corner = null;
@@ -232,7 +265,7 @@ function beginJump(fighter, command) {
   if (motion.strike) setPose(fighter, 'dive');
 }
 
-function advanceMotion(fighter, command, dt) {
+function advanceMotion(match, fighter, command, dt) {
   const motion = fighter.motion;
   const { from, to, kind, duration } = motion;
   if (kind === 'jump' && command.strike && !motion.strike) {
@@ -271,8 +304,7 @@ function advanceMotion(fighter, command, dt) {
       setPose(fighter, 'land');
     } else if (kind === 'fall') {
       fighter.health = Math.max(0, fighter.health - (motion.damage ?? impactDamage(10)));
-      fighter.recover = 1.8;
-      setPose(fighter, 'down');
+      knockDown(match, fighter);
     } else {
       setPose(fighter, 'idle');
     }
@@ -333,6 +365,7 @@ function ageFighter(fighter, dt) {
   fighter.age += dt;
   fighter.tauntCooldown = Math.max(0, fighter.tauntCooldown - dt);
   fighter.signatureCooldown = Math.max(0, fighter.signatureCooldown - dt);
+  fighter.weakStrikeCooldown = Math.max(0, fighter.weakStrikeCooldown - dt);
   if (!fighter.combo) return;
   fighter.combo.remaining -= dt;
   if (fighter.combo.remaining < -EPSILON) fighter.combo = null;
@@ -345,11 +378,21 @@ function comboFollowUp(fighter, command) {
   return null;
 }
 
+function groundTarget(fighter, opponent, referee, move, preference) {
+  if (preference === 'opponent' || !canHitReferee(referee) || fighter.surface !== referee.surface ||
+      !inRange(fighter, referee, move.reach, move.depth)) return opponent;
+  if (preference === 'referee') return referee;
+  const opponentAvailable = grounded(opponent) && fighter.surface === opponent.surface && opponent.pose !== 'down' &&
+    (opponent.recover <= EPSILON || fighter.combo && opponent.pose === 'hit' && opponent.recover < move.impact) &&
+    inRange(fighter, opponent, move.reach, move.depth);
+  return !opponentAvailable || walkDistance(fighter, referee) < walkDistance(fighter, opponent) ? referee : opponent;
+}
+
 function startGroundAttack(fighter, opponent, name) {
   const hits = comboFollowUp(fighter, { strike: name === 'strike', throw: name === 'throw' })
     ? fighter.combo.hits : 0;
   const canFollowHit = hits > 0 && opponent.pose === 'hit' && opponent.recover < ATTACKS[name].impact;
-  if (!grounded(opponent) || fighter.surface !== opponent.surface ||
+  if (!grounded(opponent) || fighter.surface !== opponent.surface || opponent.pose === 'down' ||
       (opponent.recover > EPSILON && !canFollowHit)) return;
   setFacing(fighter, opponent);
   fighter.combo = null;
@@ -392,14 +435,16 @@ function advanceAttack(fighter, opponent, command, dt) {
   if (fighter.attack?.name === 'throw' && grabQueued) fighter.attack.grabQueued = true;
 }
 
-function advanceWrestler(fighter, opponent, command, dt) {
+function advanceWrestler(match, fighter, opponent, command, dt, preference) {
+  const { referee } = match;
   const x = command.x || 0;
   const z = command.z || 0;
   ageFighter(fighter, dt);
+  if (fighter.knockdown) return null;
   updateRushCommand(fighter, command, x, z);
-  if (fighter.motion) return advanceMotion(fighter, command, dt);
+  if (fighter.motion) return advanceMotion(match, fighter, command, dt);
   if (fighter.attack) {
-    advanceAttack(fighter, opponent, command, dt);
+    advanceAttack(fighter, fighter.attack.target === 'referee' ? referee : opponent, command, dt);
     return null;
   }
   if (fighter.pose === 'taunt') {
@@ -409,16 +454,20 @@ function advanceWrestler(fighter, opponent, command, dt) {
   if (fighter.recover > 0) {
     fighter.recover = Math.max(0, fighter.recover - dt);
     if (fighter.recover === 0) setPose(fighter, 'idle');
-    else if (fighter.pose === 'down' && fighter.recover <= 0.36) setPose(fighter, 'rise');
     return null;
   }
 
+  const exhausted = fighter.health === 0;
+  if (exhausted) {
+    fighter.lean = null;
+    fighter.rush = null;
+  }
   const action = command.interact && availableInteraction(fighter);
   if (action) {
     interact(fighter, action);
     return null;
   }
-  if (command.jump) {
+  if (!exhausted && command.jump) {
     beginJump(fighter, command);
     return null;
   }
@@ -434,30 +483,37 @@ function advanceWrestler(fighter, opponent, command, dt) {
     return null;
   }
   if (command.signature && canUseSignature(fighter)) {
-    setFacing(fighter, opponent);
+    const target = groundTarget(fighter, opponent, referee, SIGNATURES[fighter.id], preference);
+    setFacing(fighter, target);
     fighter.combo = null;
     fighter.rush = null;
     fighter.signatureCooldown = SIGNATURE_COOLDOWN;
     fighter.attack = { name: 'signature', time: 0, spent: false };
+    if (target === referee) fighter.attack.target = 'referee';
     setPose(fighter, 'signature');
     return null;
   }
 
-  if (command.shove && opponent.pose === 'perch') {
+  if (!exhausted && command.shove && opponent.pose === 'perch') {
     setFacing(fighter, opponent);
     fighter.attack = { name: 'shove', time: 0, spent: false };
     setPose(fighter, 'strike');
     return null;
   }
-  if (command.throw || command.strike) {
-    const name = command.throw ? 'throw' : 'strike';
-    startGroundAttack(fighter, opponent, name);
+  const wantsThrow = !exhausted && command.throw;
+  if (wantsThrow || command.strike && fighter.weakStrikeCooldown <= EPSILON) {
+    const name = wantsThrow ? 'throw' : 'strike';
+    const target = groundTarget(fighter, opponent, referee, ATTACKS[name], preference);
+    if (target === referee) fighter.combo = null;
+    startGroundAttack(fighter, target, name);
     if (fighter.attack) {
+      if (exhausted) fighter.weakStrikeCooldown = WEAK_STRIKE_COOLDOWN;
+      if (target === referee) fighter.attack.target = 'referee';
       if (name === 'throw' && command.throw > 1) fighter.attack.grabQueued = true;
       return null;
     }
   }
-  if (command.block) {
+  if (!exhausted && command.block) {
     setPose(fighter, 'block');
     return null;
   }
@@ -481,7 +537,7 @@ function advanceWrestler(fighter, opponent, command, dt) {
   const nextX = fighter.x + x / length * WALK.x * dt * speed;
   const nextZ = fighter.z + z / length * WALK.z * dt * speed;
   const point = surfacePoint(fighter, nextX, nextZ);
-  const edge = fighter.surface === 'mat' && edgePressed(nextX, nextZ, point);
+  const edge = !exhausted && fighter.surface === 'mat' && edgePressed(nextX, nextZ, point);
   const movementX = point.x - fighter.x;
   Object.assign(fighter, point);
   if (edge) {
@@ -497,7 +553,7 @@ function advanceWrestler(fighter, opponent, command, dt) {
   return null;
 }
 
-function jumpContact(fighter, opponent, jump) {
+function jumpContactWith(fighter, opponent, jump) {
   const { motion, previousHeight, landed } = jump;
   const sameSurface = grounded(opponent) && opponent.surface === motion.to.surface;
   const overlap = sameSurface && inRange(fighter, opponent, 23, 10);
@@ -505,30 +561,37 @@ function jumpContact(fighter, opponent, jump) {
     const top = opponent.height + (opponent.pose === 'down' ? 7 : 19);
     const overFloor = fighter.x <= -FLOOR.apron || fighter.x >= RING.width + FLOOR.apron || fighter.z >= FLOOR.threshold;
     const overTarget = opponent.surface === 'mat' ? !overFloor : overFloor;
-    if (!motion.hit && overlap && overTarget && fighter.height < previousHeight &&
+    if (overlap && overTarget && fighter.height < previousHeight &&
         fighter.height <= top && previousHeight >= opponent.height) {
-      motion.hit = true;
-      return { damage: 20, fall: true, facing: fighter.facing, atMat: true };
+      return { damage: 20, fall: true, facing: fighter.facing, atMat: true, aerial: true };
     }
-    if (landed && !motion.hit) fighter.recover = 0.54;
   } else if (landed && motion.strike && overlap && opponent.pose !== 'block') {
-    return { damage: 10, fall: false, facing: fighter.facing };
+    return { damage: 10, fall: false, facing: fighter.facing, aerial: true };
   }
   return null;
 }
 
-function attackContact(fighter, opponent) {
-  const attack = fighter.attack;
-  if (!attack || attack.spent) return null;
-  const move = attackTimeline(fighter);
-  if (attack.time + EPSILON < move.impact) return null;
-  attack.spent = true;
+function jumpContact(fighter, opponent, referee, jump) {
+  const { motion, landed } = jump;
+  if (motion.hit) return null;
+  const opponentHit = jumpContactWith(fighter, opponent, jump);
+  const refereeHit = !opponentHit && canHitReferee(referee) && jumpContactWith(fighter, referee, jump);
+  if (opponentHit || refereeHit) {
+    motion.hit = true;
+    return opponentHit || { ...refereeHit, referee: true, heavy: motion.fromCorner };
+  }
+  if (landed && motion.fromCorner) fighter.recover = 0.54;
+  return null;
+}
+
+function groundContactWith(fighter, opponent, move, againstReferee = false) {
+  const { attack } = fighter;
   if (attack.name === 'shove') {
     return opponent.pose === 'perch' && inRange(fighter, opponent, move.reach, move.depth)
       ? { corner: opponent.corner, damage: 10, facing: fighter.facing }
       : null;
   }
-  if (!grounded(opponent) || fighter.surface !== opponent.surface || opponent.recover > EPSILON ||
+  if (!grounded(opponent) || fighter.surface !== opponent.surface || opponent.pose === 'down' || opponent.recover > EPSILON ||
       !inRange(fighter, opponent, move.reach, move.depth)) return null;
   if (attack.name === 'rush') {
     if (opponent.pose === 'block' || forwardOf(attack, opponent.x - fighter.x, opponent.z - fighter.z) < -3) return null;
@@ -542,12 +605,27 @@ function attackContact(fighter, opponent) {
       push: { x: fighter.facing * (move.fall ? 11 : 6), z: 0 } };
   }
   const hits = attack.hits || 0;
-  if (attack.name === 'strike') {
+  if (attack.name === 'strike' && !againstReferee && fighter.health > 0) {
     fighter.combo = { hits: hits + 1, remaining: COMBO_WINDOW, queued: null };
   }
   const bonus = attack.name === 'throw' ? hits * 3 : hits * 2;
   return { damage: move.damage + bonus, facing: fighter.facing,
     grab: attack.name === 'throw' ? GRAPPLES[fighter.id].style : undefined, queued: attack.grabQueued };
+}
+
+function attackContact(fighter, opponent, referee) {
+  const { attack } = fighter;
+  if (!attack || attack.spent) return null;
+  const move = attackTimeline(fighter);
+  if (attack.time + EPSILON < move.impact) return null;
+  attack.spent = true;
+  if (attack.target !== 'referee') {
+    const contact = groundContactWith(fighter, opponent, move);
+    if (contact) return contact;
+  }
+  if (!canHitReferee(referee) || attack.name === 'shove') return null;
+  const contact = groundContactWith(fighter, referee, move, true);
+  return contact && { ...contact, referee: true, heavy: attack.name !== 'strike' };
 }
 
 function scaleAttack(fighter, attack) {
@@ -556,9 +634,7 @@ function scaleAttack(fighter, attack) {
   return { ...attack, damage: impactDamage(attack.damage, power), power };
 }
 
-function receiveAttack(match, fighter, attack) {
-  if (!attack) return;
-  fighter.combo = null;
+function addImpact(match, fighter, attack) {
   const { x: victimX, z: victimZ, height } = fighter;
   const direction = attack.push || { x: attack.facing, z: 0 };
   match.impacts.push({
@@ -566,9 +642,14 @@ function receiveAttack(match, fighter, attack) {
     z: victimZ - Math.sign(direction.z) * 2,
     height: attack.atMat ? height + 3 : height + 17,
     xDirection: Math.sign(direction.x), zDirection: Math.sign(direction.z),
-    heavy: Boolean(attack.fall || attack.corner || attack.atMat),
+    heavy: Boolean(attack.heavy || attack.fall || attack.corner || attack.atMat),
     at: match.elapsed, until: match.elapsed + IMPACT_DURATION
   });
+}
+
+function receiveAttack(match, fighter, attack) {
+  fighter.combo = null;
+  addImpact(match, fighter, attack);
   if (attack.corner) {
     const { x, z, side } = attack.corner;
     const target = matPoint(x + inward(side).x * 22, z + (z === 0 ? 9 : -9));
@@ -578,17 +659,25 @@ function receiveAttack(match, fighter, attack) {
     motion.damage = attack.damage;
     return;
   }
+  const exhaustedBeforeHit = fighter.health === 0;
   fighter.health = Math.max(0, fighter.health - attack.damage);
+  if (fighter.knockdown) {
+    if (attack.aerial) fighter.knockdown.taps = Math.max(0, fighter.knockdown.taps - 2);
+    return;
+  }
   fighter.attack = null;
   fighter.lean = null;
   fighter.motion = null;
   fighter.rush = null;
   resetHeight(fighter);
-  const fall = attack.fall || fighter.health === 0;
-  fighter.recover = fall ? 1.8 : 0.23;
+  const fall = attack.fall || exhaustedBeforeHit;
   const push = attack.push || { x: attack.facing * (fall ? 9 : 3), z: 0 };
   Object.assign(fighter, surfacePoint(fighter, fighter.x + push.x * attack.power, fighter.z + push.z * attack.power));
-  setPose(fighter, fall ? 'down' : 'hit');
+  if (fall) knockDown(match, fighter);
+  else {
+    fighter.recover = 0.23;
+    setPose(fighter, 'hit');
+  }
 }
 
 function beginHold(match, index, contact) {
@@ -613,10 +702,29 @@ function beginHold(match, index, contact) {
   setPose(defender, 'held');
 }
 
-function pulse(state, interval) {
-  const taps = Math.max(0, Math.floor((state.elapsed - state.nextBotTap + EPSILON) / interval) + 1);
+function pulse(state, interval, elapsed = state.elapsed) {
+  const taps = Math.max(0, Math.floor((elapsed - state.nextBotTap + EPSILON) / interval) + 1);
   state.nextBotTap += taps * interval;
   return taps;
+}
+
+function updateKnockdowns(match, previous, playerTaps) {
+  const knockedOut = [];
+  for (const [index, fighter] of match.fighters.entries()) {
+    const down = fighter.knockdown;
+    if (!down || down !== previous[index]) continue;
+    const now = Math.min(match.elapsed, down.deadline);
+    if (index === 1) {
+      down.taps += pulse(down, down.botTapInterval, now - down.startedAt);
+    } else if (match.elapsed <= down.deadline + EPSILON) {
+      down.taps += Number(playerTaps || 0);
+    }
+    if (down.taps >= down.needed) startRise(fighter);
+    else if (match.elapsed + EPSILON >= down.deadline) knockedOut.push(index);
+  }
+  if (knockedOut.length) {
+    match.end = { winner: knockedOut.length === 2 ? null : 1 - knockedOut[0], reason: 'knockout' };
+  }
 }
 
 function releaseHold(match, attacker, defender) {
@@ -665,6 +773,88 @@ function updateHold(match, command, dt) {
   receiveAttack(match, defender, { ...hold.contact, fall: true, atMat: true });
   attacker.recover = 0.32;
   setPose(attacker, 'land');
+}
+
+function placeHeldReferee(referee, attacker, progress = 0) {
+  Object.assign(referee, matPoint(attacker.x + attacker.facing * (11 + 10 * progress), attacker.z + 1));
+  referee.height = RING.height + Math.sin(progress * Math.PI) * GRAPPLES[attacker.id].lift;
+  referee.facing = -attacker.facing;
+}
+
+function beginRefereeHold(match, index, contact) {
+  const { referee } = match;
+  const attacker = match.fighters[index];
+  referee.interaction = {
+    index, phase: 'clinch', elapsed: 0, duration: CLINCH_LIMIT, previousPhase: referee.phase,
+    signature: Boolean(contact.signature), queued: Boolean(contact.queued)
+  };
+  referee.phase = 'held';
+  referee.moving = false;
+  attacker.attack = null;
+  attacker.rush = null;
+  attacker.combo = null;
+  resetHeight(attacker);
+  setPose(attacker, 'clinch');
+  placeHeldReferee(referee, attacker);
+}
+
+function releaseRefereeInteraction(match) {
+  const { referee } = match;
+  const { index, previousPhase } = referee.interaction;
+  referee.interaction = null;
+  referee.phase = previousPhase;
+  referee.height = RING.height;
+  advanceReferee(referee, match.elapsed);
+  const attacker = match.fighters[index];
+  attacker.recover = 0.18;
+  setPose(attacker, 'idle');
+}
+
+function updateRefereeInteraction(match, command, dt) {
+  const { referee } = match;
+  const interaction = referee.interaction;
+  const attacker = match.fighters[interaction.index];
+  ageFighter(attacker, dt);
+  interaction.elapsed += dt;
+  if (interaction.phase === 'pin') {
+    if (interaction.elapsed + EPSILON >= interaction.duration) releaseRefereeInteraction(match);
+    return;
+  }
+  if (interaction.phase === 'clinch') {
+    placeHeldReferee(referee, attacker);
+    interaction.queued ||= Boolean(command.throw) || interaction.index === 1;
+    const windup = interaction.signature ? SIGNATURE_CLINCH : CLINCH_WINDUP;
+    if ((interaction.signature || interaction.queued) && interaction.elapsed + EPSILON >= windup) {
+      interaction.phase = 'throw';
+      interaction.elapsed = 0;
+      interaction.duration = interaction.signature
+        ? SIGNATURES[attacker.id].duration - SIGNATURES[attacker.id].impact : GRAPPLES[attacker.id].duration;
+      setPose(attacker, 'grappling');
+    } else if (interaction.elapsed + EPSILON >= interaction.duration) {
+      releaseRefereeInteraction(match);
+    }
+    return;
+  }
+
+  const progress = clamp(interaction.elapsed / interaction.duration, 0, 1);
+  placeHeldReferee(referee, attacker, progress);
+  if (progress < 1 - EPSILON) return;
+  releaseRefereeInteraction(match);
+  addImpact(match, referee, { fall: true, atMat: true, facing: attacker.facing });
+  knockRefereeDown(referee, match.elapsed);
+  attacker.recover = 0.32;
+  setPose(attacker, 'land');
+}
+
+function contactReferee(match, index, contact, incoming) {
+  const { referee } = match;
+  if (!contact?.referee || !canHitReferee(referee)) return;
+  if (contact.grab) {
+    if (!incoming && !match.hold) beginRefereeHold(match, index, contact);
+    return;
+  }
+  addImpact(match, referee, contact);
+  hitReferee(referee, match.elapsed, contact.heavy);
 }
 
 function separate(fighters) {
@@ -872,25 +1062,125 @@ function botComboCommand(match, fighter) {
   return fighter.combo.hits === 1 && inRange(fighter, player, 21, 8) ? { strike: true } : {};
 }
 
+function refereeBotInput(match) {
+  const { referee, bot } = match;
+  const [player, fighter] = match.fighters;
+  const bothOnMat = fighter.surface === 'mat' && player.surface === 'mat';
+  if (referee.interaction?.index === 0 && bothOnMat) {
+    bot.refereePlan = null;
+    return botAttack(match) || steer(fighter, player, 15, 5);
+  }
+
+  const playerInReach = inRange(fighter, player, STRIKE.reach, STRIKE.depth);
+  if (match.elapsed + EPSILON >= bot.nextRefereeAttempt) {
+    bot.nextRefereeAttempt = (Math.floor((match.elapsed + EPSILON) / REFEREE_BOT_INTERVAL) + 1) * REFEREE_BOT_INTERVAL;
+    if (bothOnMat && !playerInReach && referee.phase === 'standing' && bot.random() < REFEREE_BOT_CHANCE) {
+      bot.refereePlan = { move: bot.random() < 0.5 ? 'throw' : 'strike', until: match.elapsed + 3 };
+      bot.plan = null;
+    }
+  }
+  const plan = bot.refereePlan;
+  if (!plan) return null;
+  if (!bothOnMat || playerInReach || !canHitReferee(referee) || match.elapsed >= plan.until) {
+    bot.refereePlan = null;
+    return null;
+  }
+  const { reach, depth } = ATTACKS[plan.move];
+  if (!inRange(fighter, referee, reach, depth)) return steer(fighter, referee, reach - 4, depth - 3);
+  if (bot.cooldown > EPSILON) return {};
+  bot.cooldown = plan.move === 'throw' ? 1.1 : 0.6;
+  return { [plan.move]: true, target: 'referee' };
+}
+
+function chooseFollowUp(match, fighter, player) {
+  const remaining = player.knockdown.deadline - match.elapsed;
+  const options = [];
+  const vulnerable = player.health === 0 || (player.health <= 30 && !canReachRopes(player));
+  if (vulnerable && !refereeHasLeft(match.referee) && canPin(match, 1)) options.push({ kind: 'pin' });
+
+  if (!fighter.corner && !fighter.lean && remaining >= GROUND_JUMP_TIME) {
+    const travel = GROUND_JUMP_TIME * speedFactor(fighter);
+    const x = (player.x - fighter.x) / (WALK.x * travel);
+    const z = (player.z - fighter.z) / (WALK.z * travel);
+    if (inRange(groundJumpTarget(fighter, x, z), player, 23, 10)) options.push({ kind: 'jump', x, z });
+  }
+
+  if (fighter.surface === 'mat') {
+    let closest;
+    let fastest = remaining;
+    for (const corner of fighter.corner ? [fighter.corner] : CORNERS) {
+      const direction = cornerAttack(corner, player);
+      if (!direction) continue;
+      const landing = cornerLanding(corner, direction.x, direction.z);
+      const approach = fighter.corner ? 0 : CORNER_CLIMB_TIME +
+        walkDistance(fighter, matPoint(corner.x, corner.z)) / (WALK.x * speedFactor(fighter));
+      const time = approach + BOT_DIVE_DELAY + landing.duration;
+      if (time > fastest) continue;
+      closest = corner;
+      fastest = time;
+    }
+    if (closest) options.push({ kind: 'corner', corner: closest });
+  }
+  if (!options.length) return { kind: 'wait' };
+  return options[Math.floor(match.bot.random() * options.length)];
+}
+
+function botFollowUp(match, fighter, player) {
+  const { knockdown } = player;
+  if (match.elapsed - knockdown.startedAt + EPSILON < BOT_FOLLOW_UP_DELAY || match.bot.cooldown > EPSILON) return {};
+  knockdown.followUp ??= chooseFollowUp(match, fighter, player);
+  const plan = knockdown.followUp;
+  switch (plan.kind) {
+    case 'pin':
+      knockdown.followUp = { kind: 'wait' };
+      return { pin: true };
+    case 'jump':
+      knockdown.followUp = { kind: 'wait' };
+      return { x: plan.x, z: plan.z, jump: true, strike: true };
+    case 'corner': {
+      if (!fighter.corner) {
+        if (nearCorner(fighter) === plan.corner) return { interact: true };
+        return steer(fighter, matPoint(plan.corner.x, plan.corner.z));
+      }
+      if (fighter.age + EPSILON < BOT_DIVE_DELAY) return {};
+      knockdown.followUp = { kind: 'wait' };
+      const direction = cornerAttack(fighter.corner, player);
+      if (direction && match.elapsed + cornerLanding(fighter.corner, direction.x, direction.z).duration <= knockdown.deadline) {
+        return { ...direction, jump: true, strike: true };
+      }
+      return { interact: true };
+    }
+    default:
+      return fighter.corner ? { interact: true } : {};
+  }
+}
+
 function botInput(match, dt) {
   const [player, fighter] = match.fighters;
   const bot = match.bot;
   bot.cooldown = Math.max(0, bot.cooldown - dt);
-  if (player.pose !== 'down') bot.sawKnockdown = false;
   if (match.outside.elapsed === 0) bot.ringsideGate = undefined;
 
   if (fighter.attack) return botComboCommand(match, fighter);
-  if (fighter.recover > EPSILON || fighter.motion || fighter.pose === 'taunt') return {};
+  if (fighter.knockdown || fighter.recover > EPSILON || fighter.motion || fighter.pose === 'taunt') return {};
+  const returning = fighter.surface === 'floor' && match.outside.elapsed >= RINGSIDE_RETURN;
+  if (player.knockdown && fighter.health > 0 && fighter.surface === player.surface && !returning) {
+    return botFollowUp(match, fighter, player);
+  }
   if (fighter.corner) {
+    if (fighter.health === 0) return { interact: true };
     const direction = cornerAttack(fighter.corner, player);
     if (!direction) return { interact: true };
-    if (fighter.age < 0.18) return {};
+    if (fighter.age < BOT_DIVE_DELAY) return {};
     startGuard(match);
     bot.cooldown = 0.83;
     return { ...direction, jump: true, strike: true };
   }
+  if (fighter.health > 0) {
+    const refereeCommand = refereeBotInput(match);
+    if (refereeCommand) return refereeCommand;
+  }
   if (fighter.surface === 'floor' && player.surface === 'floor') bot.ringsideGate = null;
-  const returning = fighter.surface === 'floor' && match.outside.elapsed >= RINGSIDE_RETURN;
   if (fighter.surface !== player.surface || returning) {
     bot.plan = null;
     if (fighter.surface === 'mat') {
@@ -910,6 +1200,14 @@ function botInput(match, dt) {
     const gate = routeToGate(fighter, fighter);
     return ringsideEntry(fighter, player, gate);
   }
+  if (fighter.health === 0) {
+    if (player.pose !== 'down' && grounded(player) && player.recover <= EPSILON &&
+        bot.cooldown <= EPSILON && fighter.weakStrikeCooldown <= EPSILON &&
+        inRange(fighter, player, STRIKE.reach, STRIKE.depth)) {
+      return { strike: true };
+    }
+    return steer(fighter, retreatTarget(fighter, player));
+  }
   if (player.pose === 'perch' && player.corner) {
     bot.plan = null;
     if (player.age < PERCH_DELAY) return {};
@@ -921,24 +1219,7 @@ function botInput(match, dt) {
     const { x, z, side } = player.corner;
     return steer(fighter, matPoint(x + inward(side).x * 13, z + (z === 0 ? 7 : -7)));
   }
-  if (player.pose === 'down') {
-    const vulnerable = player.health === 0 || (player.health <= 30 && !canReachRopes(player));
-    if (fighter.surface === 'mat' && vulnerable) {
-      return canPin(match, 1) ? { pin: bot.cooldown <= 0 } : steer(fighter, player, 15, 8);
-    }
-    if (!bot.sawKnockdown && bot.cooldown < 1 && player.recover >= 0.85 && canTaunt(fighter) &&
-        (!inRange(fighter, player, 16, 8) || bot.style === 'taunt')) {
-      bot.sawKnockdown = true;
-      if (bot.random() < (bot.style === 'taunt' ? 0.75 : 0.35)) {
-        startGuard(match);
-        return { taunt: true };
-      }
-    }
-    if (fighter.surface === 'mat' && inRange(fighter, player, 22, 9)) {
-      return steer(fighter, retreatTarget(fighter, player));
-    }
-    return {};
-  }
+  if (player.pose === 'down') return {};
   const defense = botDefense(match);
   if (defense) return defense;
   if (bot.counter > match.elapsed) return botAttack(match) || {};
@@ -989,6 +1270,11 @@ function botInput(match, dt) {
 
 function moveReferee(match, target, dt) {
   const ref = match.referee;
+  if (!canRefereeCount(ref) || dt <= EPSILON) return;
+  if (!target) {
+    walkRefereeAroundFighters(ref, match.fighters, dt);
+    return;
+  }
   const offset = match.pin ? (target.x > RING.width / 2 ? -37 : 37) : 0;
   const x = clamp(target.x + offset, 14, RING.width - 14);
   const z = clamp(target.z - 11, 3, RING.depth - 7);
@@ -1014,8 +1300,29 @@ function updateRopes(match, dt) {
 export function canPin(match, index) {
   const attacker = match.fighters[index];
   const defender = match.fighters[1 - index];
-  return !match.hold && attacker.surface === 'mat' && defender.surface === 'mat' && canAct(attacker) &&
+  return attacker.health > 0 && !match.hold && match.referee.interaction?.index !== index &&
+    attacker.surface === 'mat' && defender.surface === 'mat' && canAct(attacker) &&
     defender.pose === 'down' && inRange(attacker, defender, 22, 12);
+}
+
+export function canPinReferee(match, index) {
+  const { referee } = match;
+  const attacker = match.fighters[index];
+  return referee.phase === 'down' && !referee.interaction && !match.hold && !match.pin &&
+    attacker.health > 0 && attacker.surface === 'mat' && canAct(attacker) && inRange(attacker, referee, 22, 12);
+}
+
+function beginRefereePin(match, index) {
+  if (!canPinReferee(match, index)) return;
+  const { referee } = match;
+  const attacker = match.fighters[index];
+  setFacing(attacker, referee);
+  Object.assign(attacker, matPoint(referee.x - attacker.facing * 8, referee.z));
+  attacker.lean = null;
+  attacker.rush = null;
+  attacker.combo = null;
+  setPose(attacker, 'pin');
+  referee.interaction = { index, phase: 'pin', previousPhase: 'down', elapsed: 0, duration: REFEREE_PIN_TIME };
 }
 
 export function canReachRopes(fighter) {
@@ -1034,19 +1341,20 @@ function beginPin(match, index) {
   attacker.rush = null;
   attacker.combo = null;
   defender.combo = null;
+  defender.knockdown = null;
   setPose(attacker, 'pin');
   match.pinBreak = null;
   const resistance = clamp((defender.health - 20) / 80, 0, 1);
   const botTapInterval = BOT_PIN_TAP_INTERVAL - (index === 0 ? 0.28 * resistance : 0);
   match.pin = {
-    attacker: index, elapsed: 0, count: 0, pressure: 1,
+    attacker: index, elapsed: 0, paused: 0, count: 0, pressure: 1,
     needed: escapeThreshold(defender.health, 32, 8),
     pressurePerTap: PIN_PRESSURE_PER_TAP * (1 - 0.60 * resistance),
     botTapInterval, nextBotTap: botTapInterval
   };
 }
 
-function updatePin(match, command, dt) {
+function updatePin(match, command, dt, refereeDt) {
   const pin = match.pin;
   const attacker = match.fighters[pin.attacker];
   const defender = match.fighters[1 - pin.attacker];
@@ -1059,35 +1367,53 @@ function updatePin(match, command, dt) {
   const resist = pin.attacker === 1 ? playerTaps : botTaps;
   pin.pressure = clamp(pin.pressure - dt / PIN_RELEASE_TIME +
     applyPressure * pin.pressurePerTap - resist / pin.needed, 0, 1);
-  moveReferee(match, defender, dt);
+  moveReferee(match, defender, refereeDt);
 
   const ropeBreak = canReachRopes(defender) &&
     (pin.attacker === 1 ? command.ropeBreak || command.block : pin.elapsed >= 0.37);
   const freshBotEscaped = pin.attacker === 0 && defender.health >= FRESH_DEFENDER_HEALTH &&
     pin.elapsed + EPSILON >= FRESH_BOT_KICK_OUT_TIME;
   if (ropeBreak || freshBotEscaped || pin.pressure <= EPSILON) {
-    setPose(attacker, 'idle');
-    setPose(defender, 'rise');
-    defender.recover = 0.36;
-    match.pin = null;
-    match.pinBreak = ropeBreak ? 'rope' : 'escape';
-    match.bot.cooldown = 0.65;
+    releasePin(match, ropeBreak ? 'rope' : 'escape');
     return;
   }
 
-  pin.count = Math.min(3, Math.floor(pin.elapsed + EPSILON));
+  const counting = canRefereeCount(match.referee);
+  pin.paused += counting ? dt - refereeDt : dt;
+  if (!counting) {
+    if (refereeHasLeft(match.referee)) pin.count = 0;
+    return;
+  }
+  pin.count = Math.min(3, Math.floor(pin.elapsed - pin.paused + EPSILON));
   if (pin.count === 3) match.end = { winner: pin.attacker, reason: 'pin' };
 }
 
-function updateOutside(match, dt) {
+function releasePin(match, reason) {
+  const { attacker } = match.pin;
+  setPose(match.fighters[attacker], 'idle');
+  const defender = match.fighters[1 - attacker];
+  startRise(defender);
+  match.pin = null;
+  match.pinBreak = reason;
+  match.bot.cooldown = 0.65;
+}
+
+function updateOutside(match, dt, refereeDt) {
   const outside = match.fighters.filter((fighter) => fighter.surface === 'floor');
   if (!outside.length) {
     match.outside.elapsed = 0;
+    match.outside.paused = 0;
     match.outside.count = 0;
     return null;
   }
   match.outside.elapsed += dt;
-  match.outside.count = Math.min(OUTSIDE_COUNT, Math.floor(match.outside.elapsed + EPSILON));
+  const counting = canRefereeCount(match.referee);
+  match.outside.paused += counting ? dt - refereeDt : dt;
+  if (!counting) {
+    if (refereeHasLeft(match.referee)) match.outside.count = 0;
+    return outside[0];
+  }
+  match.outside.count = Math.min(OUTSIDE_COUNT, Math.floor(match.outside.elapsed - match.outside.paused + EPSILON));
   if (match.outside.count === OUTSIDE_COUNT) {
     const draw = outside.length === match.fighters.length;
     match.end = {
@@ -1098,52 +1424,85 @@ function updateOutside(match, dt) {
   return outside[0];
 }
 
+function resolveContacts(match, contacts) {
+  const [player, bot] = match.fighters;
+  const fighterAttacks = contacts.map((contact, index) =>
+    contact?.referee ? null : scaleAttack(match.fighters[index], contact));
+  const [playerAttack, botAttack] = fighterAttacks;
+  const interaction = match.referee.interaction;
+  if (interaction && fighterAttacks[1 - interaction.index]) releaseRefereeInteraction(match);
+
+  if (playerAttack?.grab && !botAttack) beginHold(match, 0, playerAttack);
+  else if (botAttack?.grab && !playerAttack) beginHold(match, 1, botAttack);
+  else {
+    if (playerAttack && !playerAttack.grab) receiveAttack(match, bot, playerAttack);
+    if (botAttack && !botAttack.grab) receiveAttack(match, player, botAttack);
+  }
+  contacts.forEach((contact, index) => contactReferee(match, index, contact, fighterAttacks[1 - index]));
+}
+
 export function stepMatch(match, command = {}, dt = STEP) {
   if (match.end) return;
-  if (!match.pin && !match.hold) dt = Math.min(match.clock, dt);
+  const { referee } = match;
+  if (refereeHasLeft(referee) || (!match.pin && !match.hold)) dt = Math.min(match.clock, dt);
   match.elapsed += dt;
   match.clock = Math.max(0, match.clock - dt);
   if (match.clock < EPSILON) match.clock = 0;
+  // A step that crosses the end of the stagger only moves the referee for the time left in that step.
+  const refereeDt = referee.phase === 'staggered' ? clamp(match.elapsed - referee.until, 0, dt) : dt;
+  advanceReferee(referee, match.elapsed);
   if (match.impacts.length) {
     match.impacts = match.impacts.filter((impact) => impact.until > match.elapsed + EPSILON);
   }
 
   if (match.pin) {
-    updatePin(match, command, dt);
+    updatePin(match, command, dt, refereeDt);
   } else if (match.hold) {
     updateHold(match, command, dt);
   } else {
-    const cpuCommand = botInput(match, dt);
+    const interaction = referee.interaction;
+    const cpuCommand = interaction?.index === 1 ? {} : botInput(match, dt);
     const [player, bot] = match.fighters;
+    const previousKnockdowns = [player.knockdown, bot.knockdown];
     const start = match.fighters.map(({ x, z }) => [x, z]);
-    const playerJump = advanceWrestler(player, bot, command, dt);
-    const botJump = advanceWrestler(bot, player, cpuCommand, dt);
-    const playerAirHit = playerJump && jumpContact(player, bot, playerJump);
-    const botAirHit = botJump && jumpContact(bot, player, botJump);
+    const playerJump = interaction?.index === 0 ? null : advanceWrestler(match, player, bot, command, dt, 'nearest');
+    const botJump = interaction?.index === 1 ? null : advanceWrestler(match, bot, player, cpuCommand, dt, cpuCommand.target || 'opponent');
+    const playerAirHit = playerJump && jumpContact(player, bot, referee, playerJump);
+    const botAirHit = botJump && jumpContact(bot, player, referee, botJump);
     const intended = match.fighters.map(({ x, z }) => [x, z]);
     separate(match.fighters);
     measureSteps(match.fighters, start, intended);
-    const playerAttack = scaleAttack(player, playerAirHit || attackContact(player, bot));
-    const botAttack = scaleAttack(bot, botAirHit || attackContact(bot, player));
-    if (playerAttack?.grab && !botAttack) beginHold(match, 0, playerAttack);
-    else if (botAttack?.grab && !playerAttack) beginHold(match, 1, botAttack);
-    else {
-      if (playerAttack && !playerAttack.grab) receiveAttack(match, bot, playerAttack);
-      if (botAttack && !botAttack.grab) receiveAttack(match, player, botAttack);
+    resolveContacts(match, [
+      playerAirHit || attackContact(player, bot, referee), botAirHit || attackContact(bot, player, referee)
+    ]);
+    if (interaction && referee.interaction === interaction) {
+      updateRefereeInteraction(match, interaction.index === 0 ? command : cpuCommand, dt);
     }
-    if (command.pin && match.clock > 0) beginPin(match, 0);
-    if (!match.pin && cpuCommand.pin && match.clock > 0) beginPin(match, 1);
+    updateKnockdowns(match, previousKnockdowns, command.pin);
+    if (!match.end && match.clock > 0) {
+      const wantsPin = command.pin && !previousKnockdowns[0];
+      if (wantsPin) beginPin(match, 0);
+      if (!match.pin && cpuCommand.pin) beginPin(match, 1);
+      if (!match.pin && wantsPin) beginRefereePin(match, 0);
+    }
   }
-  if (!match.pin) {
-    const outside = updateOutside(match, dt);
-    const [player, bot] = match.fighters;
-    moveReferee(match, outside || { x: (player.x + bot.x) / 2, z: 15 }, dt);
-    if (match.end && match.hold) releaseHold(match, player, bot);
+  if (!match.pin && !match.end) {
+    const outside = updateOutside(match, dt, refereeDt);
+    moveReferee(match, outside, refereeDt);
+    if (match.end && match.hold) releaseHold(match, ...match.fighters);
   }
   updateRopes(match, dt);
   match.crowdTime += dt * (match.fighters.some((fighter) => fighter.pose === 'taunt') ? 1.65 : 1);
 
-  if (!match.end && !match.pin && !match.hold && match.clock === 0) {
+  if (match.end || match.clock !== 0) return;
+  if (refereeHasLeft(referee)) {
+    const [player, bot] = match.fighters;
+    const winner = player.health === bot.health ? null : player.health > bot.health ? 0 : 1;
+    match.end = { winner, reason: 'stamina' };
+    if (match.pin) releasePin(match, 'time');
+    if (match.hold) releaseHold(match, player, bot);
+  } else if (!match.pin && !match.hold) {
+    if (referee.interaction) releaseRefereeInteraction(match);
     match.end = { winner: null, reason: 'time' };
   }
 }

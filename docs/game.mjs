@@ -1,5 +1,5 @@
 import {
-  availableInteraction, canPin, canReachRopes, createMatch, STEP, stepMatch
+  availableInteraction, canPin, canPinReferee, canReachRopes, createMatch, STEP, stepMatch
 } from './match.mjs';
 import { createRenderer, loadArt } from './render.mjs';
 import { drawPixelText } from './pixel-text.mjs';
@@ -7,6 +7,7 @@ import { createMatchMenu } from './menu.mjs';
 import { createGameAudio } from './audio.mjs';
 import { contextAction, createGamepad, joystickJumpDirection } from './gamepad.mjs';
 import { GRAPPLES, ROSTER, SIGNATURES } from './roster.mjs';
+import { advanceReferee, canRefereeCount, refereeHasLeft, REFEREE_ATTACK_LIMIT } from './referee.mjs';
 
 const get = (id) => document.getElementById(id);
 const canvas = get('ring');
@@ -58,7 +59,9 @@ const controlLabels = {
 };
 const resultText = {
   pin: 'Three-count pinfall.',
+  knockout: 'Won by knockout.',
   time: 'Time expired.',
+  stamina: 'Won by remaining stamina at the time limit.',
   countout: 'Your opponent was counted out.',
   'double-countout': 'Both wrestlers were counted out.'
 };
@@ -104,7 +107,7 @@ function pressGamepadAction(action) {
     return;
   }
   const contextual = action === 'context';
-  if (contextual) action = contextAction(match, canPin(match, 0));
+  if (contextual) action = contextAction(match, canPin(match, 0) || canPinReferee(match, 0));
   if (action === 'guard') {
     gamepadGuard = true;
     bufferAction(gamepadBuffer, 'block');
@@ -226,10 +229,24 @@ function updateScore() {
   });
 }
 
-function updateCall() {
-  const { pin, hold, outside } = match;
+function refereeCall() {
+  const { referee, elapsed } = match;
+  const sinceChange = elapsed - referee.changedAt;
+  if (referee.phase === 'fleeing') return 'Referee fleeing';
+  if (referee.phase === 'gone' && sinceChange < 3.3) return 'Referee left';
+  if (referee.phase === 'down' && sinceChange < 1.4 && !referee.interaction) {
+    return `Referee down · ${referee.attacks}/${REFEREE_ATTACK_LIMIT}`;
+  }
+  return '';
+}
+
+function updateCall(refereeMessage) {
+  const { pin, hold, outside, referee } = match;
   const keys = controlLabels[controlScheme];
-  call.hidden = mode !== 'fight' || outside.elapsed === 0;
+  const counting = canRefereeCount(referee);
+  const callText = refereeMessage || (outside.elapsed > 0 && counting ? 'Outside' : '');
+  if (call.textContent !== callText) call.textContent = callText;
+  call.hidden = mode !== 'fight' || !callText;
   pinPressure.hidden = mode !== 'fight' || !pin || Boolean(match.end);
   if (!pinPressure.hidden) {
     const pressure = String(Math.ceil(pin.pressure * 100));
@@ -241,25 +258,45 @@ function updateCall() {
 
   let hint = '';
   if (mode === 'fight' && !match.end) {
-    const player = match.fighters[0];
+    const [player, opponent] = match.fighters;
+    const { knockdown } = player;
     const pinAvailable = canPin(match, 0);
-    const context = contextAction(match, pinAvailable);
+    const refereePinAvailable = canPinReferee(match, 0);
+    const refereeAction = referee.interaction;
+    const refereePinning = refereeAction?.index === 0 && refereeAction.phase === 'pin';
+    const context = contextAction(match, pinAvailable || refereePinAvailable);
     if (gamepadLayout.matches) {
       const escaping = pin?.attacker === 1 || hold?.index === 1;
-      gamepad.setLabel('Y', context === 'guard' ? 'Block' : escaping ? 'Escape' : 'Pin');
-      gamepad.setLabel('B', hold?.index === 0 && hold.phase === 'clinch' ? 'Throw' : 'Grapple');
+      let yLabel = player.health > 0 ? 'Block' : '';
+      if (context === 'pin') yLabel = escaping ? 'Escape' : knockdown ? 'Get up' : 'Pin';
+      gamepad.setLabel('Y', yLabel);
+      const clinch = hold || refereeAction;
+      gamepad.setLabel('B', clinch?.index === 0 && clinch.phase === 'clinch' ? 'Throw' : 'Grapple');
     }
     const interaction = availableInteraction(player)?.name;
     if (pin) {
       hint = pin.attacker === 0 ? `Tap ${keys.pin} to keep the pin` : `Tap ${keys.pin} to kick out`;
       if (pin.attacker === 1 && canReachRopes(player)) hint += ` · ${keys.ropeBreak} — Grab the rope`;
+      if (!counting) hint += ' · No count';
+    } else if (knockdown) {
+      const seconds = Math.max(0, Math.ceil(knockdown.deadline - match.elapsed - 1e-8));
+      hint = `Tap ${keys.pin} to get up · ${knockdown.taps}/${knockdown.needed} · ${seconds}s`;
     } else if (hold) {
       if (hold.phase === 'clinch') {
         if (hold.index === 1) hint = `${keys.pin} — Escape ${hold.escape}/${hold.needed}`;
         else if (!hold.contact.signature && !hold.queued) hint = `${keys.throw} — Throw`;
       }
+    } else if (refereeAction) {
+      if (refereeAction.index === 1) hint = `${keys.strike} — Interrupt`;
+      else if (refereePinning) hint = 'Pinning the referee · No count';
+      else if (refereeAction.phase === 'clinch' && !refereeAction.signature && !refereeAction.queued) {
+        hint = `${keys.throw} — Throw the referee`;
+      }
     } else if (pinAvailable) {
       hint = `Press ${keys.pin} to pin`;
+      if (opponent.knockdown) hint += ` · ${Math.ceil(opponent.knockdown.deadline - match.elapsed - 1e-8)}s to get up`;
+    } else if (refereePinAvailable) {
+      hint = `${keys.pin} — Pin the referee`;
     } else if (match.fighters[1].attack?.name === 'shove' && player.pose === 'perch') {
       hint = `Shove incoming · ${keys.jump} — Dive`;
     } else if (player.motion?.kind === 'jump' && !player.motion.strike) {
@@ -273,6 +310,7 @@ function updateCall() {
     } else if (player.combo) {
       hint = player.combo.hits === 2 ? `${keys.throw} — Finish combo` : `${keys.strike} or ${keys.throw} — Continue combo`;
     }
+    if (!hint && refereeHasLeft(referee)) hint = 'Stamina decides at the time limit';
   }
   if (pinHint.textContent !== hint) pinHint.textContent = hint;
   pinHint.hidden = !hint;
@@ -280,8 +318,9 @@ function updateCall() {
 
 function render() {
   let message = '';
-  if (mode === 'fight') {
-    if (match.pin && match.pin.count === 0) message = 'PIN';
+  const refereeMessage = refereeCall();
+  if (mode === 'fight' && !refereeMessage) {
+    if (match.pin && match.pin.count === 0 && (canRefereeCount(match.referee) || match.pin.elapsed < 0.65)) message = 'PIN';
     else if (match.elapsed < 0.65 && !match.outside.elapsed && !match.pin) message = 'FIGHT!';
   }
   draw(selection.arena, match, !reducedMotion.matches, {
@@ -290,7 +329,7 @@ function render() {
     call: message
   });
   updateScore();
-  updateCall();
+  updateCall(refereeMessage);
 }
 
 function clearKeyboardInput() {
@@ -360,14 +399,22 @@ function tick(now) {
     const previousOutside = match.outside.elapsed;
     const previousCount = match.outside.count;
     const previousPoses = match.fighters.map((fighter) => fighter.pose);
+    const previousKnockdown = match.fighters[0].knockdown;
+    const previousRefereePhase = match.referee.phase;
+    const previousRefereeAttacks = match.referee.attacks;
     stepMatch(match, input());
     if (match.end) {
       clearGamepadInput();
       audio.setTrack(null);
     }
     const keys = controlLabels[controlScheme];
-    if (match.pin !== previousPin) {
-      if (!match.pin) describe(match.pinBreak === 'rope' ? 'Rope break. The referee stopped the pin.' : 'The pin was broken.');
+    if (match.referee.attacks !== previousRefereeAttacks) {
+      describe(refereeHasLeft(match.referee) ? 'The referee is leaving. Stamina decides at the time limit.' :
+        `Referee down. ${match.referee.attacks} of ${REFEREE_ATTACK_LIMIT} attacks.`);
+    } else if (previousRefereePhase === 'down' && match.referee.phase === 'standing') {
+      describe('The referee is back on his feet.');
+    } else if (match.pin !== previousPin) {
+      if (!match.pin) describe(match.pinBreak === 'rope' ? 'Rope break. The pin ended.' : 'The pin was broken.');
       else if (match.pin.attacker === 0) describe(`Pin. Tap ${keys.pin} to keep the pin.`);
       else {
         const player = match.fighters[0];
@@ -376,9 +423,13 @@ function tick(now) {
       }
     } else if (match.pin && match.pin.count > previousPinCount) {
       describe(`Pin count ${match.pin.count}.`);
+    } else if (match.fighters[0].knockdown && match.fighters[0].knockdown !== previousKnockdown) {
+      describe(`Knockdown. Tap ${keys.pin} ${match.fighters[0].knockdown.needed} times to get up. You have four seconds.`);
+    } else if (previousKnockdown && match.fighters[0].pose === 'rise') {
+      describe('Getting up.');
     } else if (match.fighters[0].motion?.kind === 'fall' && match.fighters[0].motion !== previousMotion) {
       describe('Your opponent shoved you off the turnbuckle.');
-    } else if (!previousOutside && match.outside.elapsed) {
+    } else if (!previousOutside && match.outside.elapsed && canRefereeCount(match.referee)) {
       describe('The referee started the countout.');
     } else if (previousOutside && !match.outside.elapsed) {
       describe('Both wrestlers returned to the ring.');
@@ -397,9 +448,13 @@ function tick(now) {
     }
     accumulated -= STEP;
   }
+  if (match.end && match.referee.phase === 'fleeing') {
+    advanceReferee(match.referee, match.elapsed + resultDisplayTime);
+  }
   render();
   const resultDelay = match.end?.reason === 'pin' ? 0.65 : 0.4;
-  if (match.end && (match.end.reason === 'time' || resultDisplayTime >= resultDelay)) {
+  const timedResult = match.end?.reason === 'time' || match.end?.reason === 'stamina';
+  if (match.end && match.referee.phase !== 'fleeing' && (timedResult || resultDisplayTime >= resultDelay)) {
     finish();
   } else {
     frameId = requestAnimationFrame(tick);
@@ -446,9 +501,10 @@ function finish() {
   setMode('result');
   const { winner, reason } = match.end;
   const title = winner === 0 ? 'You win' : winner === 1 ? `${ROSTER[match.fighters[1].id]} wins` : 'Draw';
-  const text = reason === 'countout' && winner === 1
-    ? 'You were counted out.'
-    : resultText[reason];
+  let text = resultText[reason];
+  if (reason === 'countout' && winner === 1) text = 'You were counted out.';
+  if (reason === 'stamina' && winner === null) text = 'Time expired with equal stamina.';
+  if (reason === 'knockout' && winner === null) text = 'Double knockout.';
   showOverlay(title, text, 'Rematch');
   describe(`${title}. ${text}`);
   render();

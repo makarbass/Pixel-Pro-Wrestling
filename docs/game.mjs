@@ -5,6 +5,7 @@ import { createRenderer, loadArt } from './render.mjs';
 import { drawPixelText } from './pixel-text.mjs';
 import { createMatchMenu } from './menu.mjs';
 import { createGameAudio } from './audio.mjs';
+import { bindFullscreen } from './fullscreen.mjs';
 import { contextAction, createGamepad, joystickJumpDirection } from './gamepad.mjs';
 import { createFighterProgress, getFighterProgress } from './fighter-progress.mjs';
 import { GRAPPLES, ROSTER, SIGNATURES } from './roster.mjs';
@@ -30,6 +31,7 @@ const signatureCooldown = get('signature-cooldown');
 const gamepadSignature = get('gamepad-signature');
 const gamepadCooldown = get('gamepad-cooldown');
 const overlay = get('overlay');
+const overlayCard = overlay.querySelector('.overlay-card');
 const overlayHeading = get('overlay-heading');
 const overlayText = get('overlay-text');
 const overlayActions = get('overlay-actions');
@@ -37,6 +39,8 @@ const overlayPrimary = get('overlay-primary');
 const overlayMenu = get('overlay-menu');
 const gamepadRoot = get('gamepad');
 const gamepadGuide = get('gamepad-guide');
+const gamepadGuideHome = gamepadGuide.parentElement;
+const gamepadPauseHint = get('gamepad-pause-hint');
 const call = get('match-call');
 const pinHint = get('pin-hint');
 const fighterProgress = createFighterProgress(get('fighter-progress'), canvas, scoreboard);
@@ -72,6 +76,7 @@ const held = new Set();
 const buffered = new Map();
 const gamepadBuffer = new Map();
 const gamepadLayout = window.matchMedia('(max-width: 760px), (any-pointer: coarse)');
+const landscape = window.matchMedia('(orientation: landscape)');
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const audio = createGameAudio();
 const COMBAT_HINTS_PREFERENCE = 'pixel-pro-wrestling.combat-hints';
@@ -122,8 +127,16 @@ function pressGamepadAction(action) {
   }
 }
 
+function updateGamepadGuide() {
+  const inPauseOverlay = gamepadLayout.matches && landscape.matches;
+  const parent = inPauseOverlay ? overlayCard : gamepadGuideHome;
+  if (gamepadGuide.parentElement !== parent) parent.append(gamepadGuide);
+  gamepadGuide.hidden = mode !== (inPauseOverlay ? 'paused' : 'fight');
+  gamepadPauseHint.hidden = !inPauseOverlay || mode !== 'fight';
+}
+
 function updateGamepad(screen) {
-  gamepadGuide.hidden = mode !== 'fight';
+  updateGamepadGuide();
   switch (mode) {
     case 'fight':
       gamepad.setScreen({ fight: true, labels: { A: 'Strike', B: 'Grapple', X: 'Jump', Y: 'Block' } });
@@ -187,6 +200,7 @@ function showOverlay(heading, body = '', primary = '', menu = true) {
   overlayActions.hidden = !primary;
   overlayMenu.hidden = !menu;
   overlay.hidden = false;
+  overlay.scrollTop = 0;
   setOverlayChoice(overlayPrimary);
 }
 
@@ -607,6 +621,9 @@ combatHintsToggle.addEventListener('click', () => {
   }
 });
 
+bindFullscreen(get('fullscreen-toggle'), get('fullscreen-state'), get('fullscreen-install'),
+  get('fullscreen-status'), gamepadLayout, clearGamepadInput);
+
 pause.addEventListener('click', pauseFight);
 overlayActions.addEventListener('focusin', (event) => {
   if (event.target === overlayPrimary || event.target === overlayMenu) setOverlayChoice(event.target);
@@ -677,7 +694,9 @@ gamepadLayout.addEventListener('change', () => {
   controlScheme = gamepadLayout.matches ? 'gamepad' : 'keyboard';
   clearGamepadInput();
   canvas.setAttribute('aria-describedby', gamepadLayout.matches ? 'gamepad-guide' : 'controls-keys');
+  updateGamepadGuide();
 });
+landscape.addEventListener('change', updateGamepadGuide);
 canvas.addEventListener('blur', clearKeyboardInput);
 canvas.addEventListener('click', () => {
   if (mode === 'fight') focusRing();

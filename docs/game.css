@@ -233,7 +233,9 @@ h1, h2, p { margin: 0; }
 
 .menu-title span { display: block; color: var(--menu-green); }
 .menu-options { display: grid; gap: 12px; width: min(100%, 295px); }
-.settings-options { justify-self: center; }
+.settings-content { display: grid; justify-items: center; gap: 10px; }
+.settings-note { max-inline-size: 38ch; color: var(--muted); font-size: 0.9rem; text-align: center; }
+.settings-note:empty { position: absolute; }
 
 .menu-option {
   --frame-color: #4cb98b;
@@ -777,12 +779,12 @@ kbd {
     background: linear-gradient(#292b3d, #1a1c29);
   }
 
-  .d-pad, .face-buttons {
+  .face-buttons {
     display: grid;
     grid-template: repeat(3, var(--cap-size)) / repeat(3, var(--cap-size));
   }
 
-  .d-pad, .joystick, .face-buttons {
+  .joystick, .face-buttons {
     touch-action: none;
     user-select: none;
     -webkit-user-select: none;
@@ -800,21 +802,6 @@ kbd {
 
   .gamepad button:disabled { cursor: default; color: #9094a5; }
   .gamepad button:focus-visible { outline-offset: -2px; z-index: 1; }
-
-  .d-pad button, .d-pad-center {
-    background: #151723;
-    color: #e5e7f0;
-    font-size: 1.05rem;
-    box-shadow: inset 0 -3px #090a11;
-  }
-
-  .d-pad [data-direction="back"] { grid-area: 1 / 2; border-radius: 7px 7px 0 0; }
-  .d-pad [data-direction="left"] { grid-area: 2 / 1; border-radius: 7px 0 0 7px; }
-  .d-pad [data-direction="right"] { grid-area: 2 / 3; border-radius: 0 7px 7px 0; }
-  .d-pad [data-direction="front"] { grid-area: 3 / 2; border-radius: 0 0 7px 7px; }
-
-  .d-pad-center { grid-area: 2 / 2; display: grid; place-items: center; box-shadow: none; }
-  .d-pad-center::after { content: ""; width: 28%; aspect-ratio: 1; border: 1px solid #464a5e; border-radius: 50%; }
 
   .joystick {
     display: grid;
@@ -841,6 +828,7 @@ kbd {
 
   .joystick[data-down] { cursor: grabbing; }
   .joystick[data-down] .joystick-thumb { border-color: var(--blue); }
+  .joystick[aria-disabled="true"] { opacity: 0.55; cursor: default; touch-action: auto; }
 
   .face-buttons button {
     display: grid;
@@ -889,22 +877,44 @@ kbd {
 }
 
 @media (orientation: landscape) and (max-width: 760px), (orientation: landscape) and (any-pointer: coarse) {
-  .shell { width: min(100%, 640px); }
+  body { min-height: 100dvh; }
 
-  .game {
-    --stage-height: min(420px, max(110px, calc(100dvh - 208px - env(safe-area-inset-top) - env(safe-area-inset-bottom))));
+  .shell {
+    position: relative;
+    width: 100%;
+    height: 100dvh;
+    padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
+    container-type: inline-size;
   }
 
-  .stage:not(.setup-stage) {
-    --ring-width: calc(var(--stage-height) * (var(--arena-ratio, 1.39)));
-    height: var(--stage-height);
+  .shell > .sr-only { inset-block-start: 0; }
+
+  .layout {
+    height: 100%;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .game {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    overflow: clip;
+  }
+
+  .stage {
+    grid-area: 1 / 1;
+    min-width: 0;
+    min-height: 0;
     aspect-ratio: auto;
   }
 
+  .stage:not(.setup-stage) { container-type: size; }
+
   .scoreboard {
+    --ring-width: calc(100cqh * (var(--arena-ratio, 1.39)));
     --portrait-size: 26px;
     inset: 4px 0 auto;
-    width: min(calc(100% - 12px), calc(var(--ring-width) - 12px));
+    width: max(0px, calc(min(100%, var(--ring-width)) - 12px));
     margin-inline: auto;
     gap: 5px;
   }
@@ -912,13 +922,13 @@ kbd {
   .fighter { min-height: 32px; padding: 3px; }
   .scoreboard-time { padding: 3px; }
   .timer-face { width: 42px; }
-  .overlay { padding: 6px; }
-  .overlay-card { gap: 6px; padding: 8px 12px; }
+  .overlay { padding: 6px; align-items: safe center; overscroll-behavior: contain; }
+  .overlay-card { gap: 6px; padding: 8px 12px; min-width: 0; max-width: 100%; }
+  .overlay .gamepad-guide { padding: 6px 0 0; }
 
   .setup-stage,
   .setup-stage:has(> .match-menu:not([hidden]) > .menu-home:not([hidden])) {
     grid-template-rows: minmax(0, 1fr);
-    height: max(110px, calc(var(--stage-height) + 30px));
     min-height: 0;
   }
 
@@ -929,7 +939,74 @@ kbd {
   .versus-card { gap: 14px; }
   .versus-fighter { min-height: 42px; }
   .versus-art { width: clamp(58px, 12cqi, 96px); }
-  .gamepad { --cap-size: 44px; }
+  .gamepad {
+    --cap-size: 44px;
+    grid-area: 2 / 1;
+    padding-block: 4px;
+  }
+
+  .gamepad-pause-hint {
+    grid-area: 3 / 1;
+    align-self: center;
+    color: var(--muted);
+    font: 0.65rem/1.15 system-ui, sans-serif;
+    text-align: center;
+    pointer-events: none;
+  }
+
+  .gamepad-pause-hint kbd {
+    padding-inline: 3px;
+    font-size: inherit;
+    white-space: nowrap;
+  }
+
+  .stage-footer {
+    grid-area: 1 / 1;
+    z-index: 1;
+    align-self: end;
+    justify-content: center;
+    min-height: 0;
+    padding: 0 8px 6px;
+    border: 0;
+    pointer-events: none;
+  }
+
+  .stage-footer .venue { display: none; }
+  .stage-footer .pin-hint {
+    flex: initial;
+    padding: 4px 8px;
+    background: #10131de6;
+    font-size: 0.9rem;
+    text-align: center;
+  }
+
+  @container (min-width: 528px) {
+    .game {
+      --control-width: 132px;
+      --control-gap: 8px;
+      grid-template-columns: var(--control-width) minmax(0, 1fr) var(--control-width);
+      grid-template-rows: minmax(0, 1fr);
+      column-gap: var(--control-gap);
+    }
+
+    .game > .stage, .game > .stage-footer { grid-area: 1 / 2; }
+
+    .game > .gamepad {
+      grid-area: 1 / 1 / 2 / -1;
+      align-self: center;
+      grid-template-columns: var(--control-width) minmax(0, 1fr) var(--control-width);
+      column-gap: var(--control-gap);
+      align-items: center;
+      justify-content: stretch;
+      padding: 0;
+      border: 0;
+      background: none;
+      pointer-events: none;
+    }
+
+    .gamepad .joystick { grid-column: 1; pointer-events: auto; }
+    .gamepad .face-buttons { grid-column: 3; pointer-events: auto; }
+  }
 }
 
 @media (forced-colors: active) {

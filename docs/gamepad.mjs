@@ -1,5 +1,9 @@
 const CHORD_WINDOW = 80;
 const JOYSTICK_DEAD_ZONE = 0.18;
+const MENU_ENGAGE = 0.45;
+const MENU_RELEASE = 0.25;
+const MENU_REPEAT_DELAY = 350;
+const MENU_REPEAT_INTERVAL = 140;
 const NEUTRAL_STICK = Object.freeze({ x: 0, z: 0, offsetX: 0, offsetY: 0 });
 const JUMP_DIRECTIONS = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
 const CHORDS = {
@@ -81,17 +85,48 @@ export function joystickJumpDirection({ x, z }) {
   return { x: jumpX, z: jumpZ };
 }
 
+export function createMenuStickInput(onDirection, clock = globalThis) {
+  let direction = null;
+  let timer;
+
+  function reset() {
+    clock.clearTimeout(timer);
+    direction = null;
+  }
+
+  function repeat() {
+    if (!direction) return;
+    timer = clock.setTimeout(repeat, MENU_REPEAT_INTERVAL);
+    onDirection(direction);
+  }
+
+  return {
+    update(x, z) {
+      const tilt = Math.hypot(x, z);
+      if (tilt < MENU_RELEASE) reset();
+      if (tilt < MENU_ENGAGE) return;
+      const next = Math.abs(x) > Math.abs(z) ? (x < 0 ? 'left' : 'right') : (z < 0 ? 'back' : 'front');
+      if (next === direction) return;
+      reset();
+      direction = next;
+      timer = clock.setTimeout(repeat, MENU_REPEAT_DELAY);
+      onDirection(direction);
+    },
+    reset
+  };
+}
+
 export function createGamepad(root, { onUse, onButton, onDirection, onPress, onRelease }) {
-  const pad = root.querySelector('.d-pad');
   const joystick = root.querySelector('.joystick');
-  const buttons = [...root.querySelectorAll('button')];
-  const faceButtons = new Map(buttons.filter((button) => button.dataset.face)
-    .map((button) => [button.dataset.face, button]));
+  const buttons = [...root.querySelectorAll('button[data-face]')];
+  const faceButtons = new Map(buttons.map((button) => [button.dataset.face, button]));
   const pointers = new Map();
   const face = createFaceInput(onPress, onRelease);
+  const menuStick = createMenuStickInput(onDirection);
   let stickPointer = null;
   let movement = NEUTRAL_STICK;
   let fighting = false;
+  let steering = false;
 
   function updatePressed() {
     const pressedButtons = new Set(pointers.values());
@@ -108,10 +143,13 @@ export function createGamepad(root, { onUse, onButton, onDirection, onPress, onR
 
   function moveStick(event) {
     const { x, y, radius } = stickPointer;
-    setStickPosition(joystickPosition(event.clientX - x, event.clientY - y, radius));
+    const position = joystickPosition(event.clientX - x, event.clientY - y, radius);
+    setStickPosition(position);
+    if (!fighting) menuStick.update(position.offsetX / radius, position.offsetY / radius);
   }
 
   function resetStick() {
+    menuStick.reset();
     stickPointer = null;
     setStickPosition(NEUTRAL_STICK);
     joystick.removeAttribute('data-down');
@@ -136,17 +174,16 @@ export function createGamepad(root, { onUse, onButton, onDirection, onPress, onR
     updatePressed();
     const cancelled = event.type !== 'pointerup';
     if (fighting) {
-      if (button.dataset.face) face.end(button.dataset.face, cancelled);
+      face.end(button.dataset.face, cancelled);
     } else if (!cancelled) {
       const target = document.elementFromPoint(event.clientX, event.clientY);
       if (!button.contains(target)) return;
-      if (button.dataset.face) onButton(button.dataset.face);
-      else onDirection(button.dataset.direction);
+      onButton(button.dataset.face);
     }
   }
 
   joystick.addEventListener('pointerdown', (event) => {
-    if (!fighting || stickPointer || event.button !== 0 || pointers.has(event.pointerId)) return;
+    if (!steering || stickPointer || event.button !== 0 || pointers.has(event.pointerId)) return;
     const { left, top, width, height } = joystick.getBoundingClientRect();
     const radius = Math.min(width, height) / 3 - 4;
     if (radius <= 0) return;
@@ -159,15 +196,15 @@ export function createGamepad(root, { onUse, onButton, onDirection, onPress, onR
   });
 
   root.addEventListener('pointerdown', (event) => {
-    const button = event.target.closest('button');
+    const button = event.target.closest('button[data-face]');
     if (!button || button.disabled || event.button !== 0 || pointers.has(event.pointerId)) return;
-    if (button.dataset.face && [...pointers.values()].includes(button)) return;
+    if ([...pointers.values()].includes(button)) return;
     event.preventDefault();
     onUse();
     root.setPointerCapture(event.pointerId);
     pointers.set(event.pointerId, button);
     updatePressed();
-    if (fighting && button.dataset.face) face.start(button.dataset.face);
+    if (fighting) face.start(button.dataset.face);
   });
 
   root.addEventListener('pointermove', (event) => {
@@ -179,29 +216,24 @@ export function createGamepad(root, { onUse, onButton, onDirection, onPress, onR
   root.addEventListener('contextmenu', (event) => event.preventDefault());
 
   root.addEventListener('click', (event) => {
-    const button = event.target.closest('button');
+    const button = event.target.closest('button[data-face]');
     if (!button || button.disabled || event.detail !== 0) return;
     onUse();
-    if (fighting && button.dataset.face) {
+    if (fighting) {
       const action = FACE_ACTIONS[button.dataset.face];
       onPress(action);
       onRelease(action);
-    } else if (button.dataset.face) onButton(button.dataset.face);
-    else onDirection(button.dataset.direction);
+    } else onButton(button.dataset.face);
   });
 
   return {
     get movement() { return movement; },
     setScreen({ fight = false, move = false, labels = {} } = {}) {
       fighting = fight;
-      pad.hidden = fight;
-      joystick.hidden = !fight;
+      steering = fight || move;
+      joystick.setAttribute('aria-disabled', String(!steering));
       for (const button of buttons) {
         const id = button.dataset.face;
-        if (!id) {
-          button.disabled = !move;
-          continue;
-        }
         button.disabled = !labels[id];
         setLabel(id, labels[id] || '');
       }

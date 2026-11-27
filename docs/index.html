@@ -7,6 +7,8 @@
   <meta name="description" content="Pixel wrestling with eight wrestlers and four arenas.">
   <title>Pixel Pro Wrestling</title>
   <link rel="icon" href="assets/icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="assets/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
   <link rel="preload" href="assets/ring-pixels.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="game.css">
   <script type="module" src="game.mjs"></script>
@@ -61,13 +63,20 @@
                 <h2 id="settings-heading">Settings</h2>
                 <button class="button button-outline button-small" type="button" data-action="back">Back</button>
               </div>
-              <div class="menu-options settings-options" data-menu-columns="1">
-                <button class="menu-option" id="sound-toggle" type="button" data-action="sound" aria-pressed="true">
-                  Sound <span id="sound-state" aria-hidden="true">On</span>
-                </button>
-                <button class="menu-option" id="combat-hints-toggle" type="button" data-action="combat-hints" aria-pressed="true">
-                  Combat hints <span id="combat-hints-state" aria-hidden="true">On</span>
-                </button>
+              <div class="settings-content">
+                <div class="menu-options" data-menu-columns="1">
+                  <button class="menu-option" id="sound-toggle" type="button" data-action="sound" aria-pressed="true">
+                    Sound <span id="sound-state" aria-hidden="true">On</span>
+                  </button>
+                  <button class="menu-option" id="combat-hints-toggle" type="button" data-action="combat-hints" aria-pressed="true">
+                    Combat hints <span id="combat-hints-state" aria-hidden="true">On</span>
+                  </button>
+                  <button class="menu-option" id="fullscreen-toggle" type="button" data-action="fullscreen" aria-pressed="false" hidden disabled>
+                    Fullscreen <span id="fullscreen-state" aria-hidden="true">Off</span>
+                  </button>
+                </div>
+                <p class="settings-note" id="fullscreen-install" hidden>Add the game to your Home Screen and open it from the icon to play without the address bar.</p>
+                <p class="settings-note" id="fullscreen-status" role="status"></p>
               </div>
             </section>
             <section class="menu-page" data-screen="presets" aria-labelledby="preset-heading" hidden>
@@ -124,14 +133,7 @@
         </div>
 
         <div class="gamepad" id="gamepad" role="group" aria-label="Game controller">
-          <div class="d-pad" role="group" aria-label="Direction pad">
-            <button type="button" data-direction="back" aria-label="Up" disabled>▲</button>
-            <button type="button" data-direction="left" aria-label="Left" disabled>◀</button>
-            <span class="d-pad-center" aria-hidden="true"></span>
-            <button type="button" data-direction="right" aria-label="Right" disabled>▶</button>
-            <button type="button" data-direction="front" aria-label="Down" disabled>▼</button>
-          </div>
-          <div class="joystick" role="group" aria-label="Movement joystick" hidden>
+          <div class="joystick" role="group" aria-label="Joystick" aria-disabled="true">
             <span class="joystick-thumb" aria-hidden="true"></span>
           </div>
           <div class="face-buttons" role="group" aria-label="Action buttons">
@@ -139,6 +141,7 @@
             <button type="button" data-face="Y" disabled>Y<span class="face-caption"></span></button>
             <button type="button" data-face="A" disabled>A<span class="face-caption"></span></button>
             <button type="button" data-face="B" disabled>B<span class="face-caption"></span></button>
+            <p class="gamepad-pause-hint" id="gamepad-pause-hint" hidden><kbd>A + Y</kbd> Pause</p>
           </div>
         </div>
 
